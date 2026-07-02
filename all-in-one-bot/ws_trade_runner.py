@@ -401,14 +401,7 @@ def close_with_ladder(client: ClobClient, opened: dict[str, Any], retry_max: int
             return post, f"filled_attempt_{attempt}_fok_chunk_{chunk}", sell_shares
         except Exception as exc:
             last_err = f"attempt_{attempt}_fok_failed: {exc}"
-            log(f"close ladder {attempt}/{retry_max}: {exc}")
-            if bid is not None and chunk > 0:
-                try:
-                    post = create_limit_sell_fak(client, token_id, chunk, bid)
-                    return post, f"filled_attempt_{attempt}_fak_bid_{bid:.4f}_chunk_{chunk}", sell_shares
-                except Exception as fak_exc:
-                    last_err = f"attempt_{attempt}_fak_failed: {fak_exc}"
-                    log(f"close ladder {attempt}/{retry_max} fak: {fak_exc}")
+            log(f"close ladder {attempt}/{retry_max} FOK failed: {exc}")
             sell_shares = sell_shares / 2
             time.sleep(0.3)
     return None, last_err, amount_shares
