@@ -467,7 +467,7 @@ def apply_profile(args: argparse.Namespace) -> argparse.Namespace:
     if args.max_spread is None:
         args.max_spread = _cfg_threshold_value("spread_by_threshold", args.threshold, DEFAULT_MAX_SPREAD)
     if args.min_book_depth_usd is None:
-        args.min_book_depth_usd = DEFAULT_MIN_BOOK_DEPTH_USD
+        args.min_book_depth_usd = float(COIN_CFG.get("min_book_depth_usd", DEFAULT_MIN_BOOK_DEPTH_USD))
     if getattr(args, "stop_loss_bid", None) is None:
         args.stop_loss_bid = float(COIN_CFG.get("stop_loss_bid", DEFAULT_STOP_LOSS_BID))
     if args.stop_loss_pct is None:
