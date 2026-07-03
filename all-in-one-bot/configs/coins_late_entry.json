@@ -30,7 +30,7 @@
     "symbol": "BTCUSDT",
     "token_id": "btc-updown-5m",
     "min_entry_seconds_left": 15,
-    "max_entry_seconds_left": 30,
+    "max_entry_seconds_left": 40,
     "profit_exit_seconds_left": 10,
     "force_exit_seconds_left": 0
   },
@@ -65,7 +65,7 @@
     "symbol": "ETHUSDT",
     "token_id": "eth-updown-5m",
     "min_entry_seconds_left": 15,
-    "max_entry_seconds_left": 30,
+    "max_entry_seconds_left": 40,
     "profit_exit_seconds_left": 10,
     "force_exit_seconds_left": 0
   },
@@ -100,7 +100,7 @@
     "symbol": "SOLUSDT",
     "token_id": "sol-updown-5m",
     "min_entry_seconds_left": 15,
-    "max_entry_seconds_left": 30,
+    "max_entry_seconds_left": 40,
     "profit_exit_seconds_left": 10,
     "force_exit_seconds_left": 0
   },
@@ -135,7 +135,7 @@
     "symbol": "XRPUSDT",
     "token_id": "xrp-updown-5m",
     "min_entry_seconds_left": 15,
-    "max_entry_seconds_left": 30,
+    "max_entry_seconds_left": 40,
     "profit_exit_seconds_left": 10,
     "force_exit_seconds_left": 0
   },
@@ -170,7 +170,7 @@
     "symbol": "DOGEUSDT",
     "token_id": "doge-updown-5m",
     "min_entry_seconds_left": 15,
-    "max_entry_seconds_left": 30,
+    "max_entry_seconds_left": 40,
     "profit_exit_seconds_left": 10,
     "force_exit_seconds_left": 0
   }
