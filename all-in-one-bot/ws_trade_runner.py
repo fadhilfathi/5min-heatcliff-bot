@@ -398,11 +398,13 @@ def close_with_ladder(client: ClobClient, opened: dict[str, Any], retry_max: int
             continue
         try:
             post = create_market_sell(client, token_id, chunk)
+            event(f"market sell: token={token_id} chunk={chunk} filled_attempt_{attempt}")
             return post, f"filled_attempt_{attempt}_fok_chunk_{chunk}", sell_shares
         except Exception as exc:
+            event(f"market sell failed: token={token_id} chunk={chunk} attempt={attempt}/{retry_max} error={exc}")
             last_err = f"attempt_{attempt}_fok_failed: {exc}"
             log(f"close ladder {attempt}/{retry_max} FOK failed: {exc}")
-            sell_shares = sell_shares / 2
+            # sell_shares = sell_shares / 2  # ponytail: removed halving to keep full order size
             time.sleep(0.3)
     return None, last_err, amount_shares
 
