@@ -179,7 +179,7 @@ class UnifiedBot:
 
     def _get_balance(self, force=False) -> Optional[float]:
         now = time.time()
-        if not force and self._last_balance_check > (now - 60):
+        if not force and self._last_balance_check > (now - 30):
             return self._cached_balance
         try:
             payload = self.auth_client.get_balance_allowance(

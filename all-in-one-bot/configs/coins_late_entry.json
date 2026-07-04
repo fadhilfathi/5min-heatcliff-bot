@@ -1,6 +1,6 @@
 {
   "BTC": {
-    "threshold": 0.95,
+    "threshold": 0.94,
     "move_min_by_threshold": {
       "0.90": 29,
       "0.91": 29,
@@ -21,7 +21,7 @@
     "trail_exit_move_gate": 5.0,
     "stop_loss_move_gate": 5.0,
     "force_exit_move_gate": 99999.0,
-    "max_entry_ask": 0.99,
+    "max_entry_ask": 0.98,
     "spread": 0.1,
     "spread_by_threshold": {
       "0.60": 0.1,
@@ -36,7 +36,7 @@
     "min_book_depth_usd": 2.0
   },
   "ETH": {
-    "threshold": 0.95,
+    "threshold": 0.94,
     "move_min_by_threshold": {
       "0.90": 1.2,
       "0.91": 1.2,
@@ -57,7 +57,7 @@
     "trail_exit_move_gate": 0.05,
     "stop_loss_move_gate": 0.05,
     "force_exit_move_gate": 99999.0,
-    "max_entry_ask": 0.99,
+    "max_entry_ask": 0.98,
     "spread": 0.1,
     "spread_by_threshold": {
       "0.60": 0.1,
@@ -72,7 +72,7 @@
     "min_book_depth_usd": 2.0
   },
   "SOL": {
-    "threshold": 0.95,
+    "threshold": 0.94,
     "move_min_by_threshold": {
       "0.90": 0.16,
       "0.91": 0.16,
@@ -93,7 +93,7 @@
     "trail_exit_move_gate": 0.0025,
     "stop_loss_move_gate": 0.0025,
     "force_exit_move_gate": 99999.0,
-    "max_entry_ask": 0.99,
+    "max_entry_ask": 0.98,
     "spread": 0.1,
     "spread_by_threshold": {
       "0.60": 0.1,
@@ -108,7 +108,7 @@
     "min_book_depth_usd": 2.0
   },
   "XRP": {
-    "threshold": 0.95,
+    "threshold": 0.94,
     "move_min_by_threshold": {
       "0.90": 0.026,
       "0.91": 0.026,
@@ -129,7 +129,7 @@
     "trail_exit_move_gate": 0.00033,
     "stop_loss_move_gate": 0.00033,
     "force_exit_move_gate": 99999.0,
-    "max_entry_ask": 0.99,
+    "max_entry_ask": 0.98,
     "spread": 0.1,
     "spread_by_threshold": {
       "0.60": 0.1,
@@ -144,7 +144,7 @@
     "min_book_depth_usd": 2.0
   },
   "DOGE": {
-    "threshold": 0.95,
+    "threshold": 0.94,
     "move_min_by_threshold": {
       "0.90": 0.00008,
       "0.91": 0.00008,
@@ -165,7 +165,7 @@
     "trail_exit_move_gate": 5e-06,
     "stop_loss_move_gate": 5e-06,
     "force_exit_move_gate": 99999.0,
-    "max_entry_ask": 0.99,
+    "max_entry_ask": 0.98,
     "spread": 0.1,
     "spread_by_threshold": {
       "0.60": 0.1,
