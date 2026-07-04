@@ -618,14 +618,14 @@ def close_with_ladder(
         bid_size = float(book.get("bid_size") or 0.0)
         if bid is None:
             last_err = f"no_bid_attempt_{attempt}"
-            sell_shares = sell_shares / 2
+            # sell_shares = sell_shares / 2
             time.sleep(0.3)
             continue
         # Cap chunk to current bid depth; shrinks on retry.
         chunk = round(min(sell_shares, bid_size if bid_size > 0 else sell_shares), 6)
         if chunk <= 0:
             last_err = f"zero_chunk_attempt_{attempt}"
-            sell_shares = sell_shares / 2
+            # sell_shares = sell_shares / 2
             time.sleep(0.3)
             continue
         try:
@@ -634,7 +634,7 @@ def close_with_ladder(
         except Exception as exc:
             last_err = f"attempt_{attempt}_fok_failed: {exc}"
             log(f"close ladder {attempt}/{retry_max}: {exc}")
-            sell_shares = sell_shares / 2
+            # sell_shares = sell_shares / 2
             time.sleep(0.3)
     return None, last_err, amount_shares
 
