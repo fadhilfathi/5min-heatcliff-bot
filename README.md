@@ -11,6 +11,7 @@ This project provides tools for:
 
 ## Architecture
 
+- `copy-trade-bot/`: Autonomous BTC directional momentum bot with hedging.
 - `all-in-one-bot/`: Orchestrator for parallel coin trading.
 - `arbitrage-bot/`: Real-time arbitrage identification and execution.
 - `ws-all-in-one-monitor/`: Shared websocket stream for efficient order book tracking.
