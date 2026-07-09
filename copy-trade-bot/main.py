@@ -286,8 +286,6 @@ def main() -> int:
                         entry_number = cb["entries"] + 1
                         if secs_left >= 60:
                             hedge_limit_price = opp_ask - 0.01
-                        elif secs_left > 15:
-                            hedge_limit_price = opp_ask
                         else:
                             hedge_limit_price = opp_ask + 0.01
                         hedge_limit_price = round(max(hedge_limit_price, 0.01), 4)
@@ -460,10 +458,8 @@ def main() -> int:
 
             tick_size = get_tick_size(client, token)
             LOG.info("[TRADE][ENTRY] event=submit bucket=%s dir=%s entry=%d token=%s ask=%.4f secs_left=%d mode=LIVE", current_bucket, cb["direction"], entry_number, token[:8], ask, secs_left)
-            # old passive entry pricing kept for reference: ask - 0.01
-            # entry_limit_price = round(max(ask - 0.01, 0.01), 4)
             entry, outcome = place_gtd_limit_order(
-                client, current_bucket, token, ask, tick_size, limit_price=ask
+                client, current_bucket, token, ask, tick_size
             )
             if entry is None:
                 LOG.error("[TRADE][ENTRY] event=failed bucket=%s dir=%s entry=%d token=%s outcome=%s", current_bucket, cb["direction"], entry_number, token[:8], outcome)
