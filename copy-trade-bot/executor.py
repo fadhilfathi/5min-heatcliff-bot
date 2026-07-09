@@ -163,19 +163,6 @@ def get_balance(client: ClobClient) -> Optional[float]:
     return None
 
 
-def update_cost_from_balance(client: ClobClient, bal_before: Optional[float], entry) -> Optional[float]:
-    if entry is None or entry.status != "FILLED" or bal_before is None:
-        return None
-    try:
-        real_cost = get_fee_inclusive_cost(client, entry.token, entry.limit_price, entry.shares, entry.cost)
-        if real_cost > 0:
-            entry.cost = real_cost
-        # Try to get post-trade balance natively without blocking
-        bal_after = get_balance(client)
-        return bal_after if bal_after is not None else round(max(bal_before - real_cost, 0.0), 6)
-    except Exception:
-        pass
-    return None
 
 def _human(raw) -> float:
     try:
@@ -281,15 +268,49 @@ def place_gtd_limit_order(
     return entry, "placed"
 
 
-def get_fee_inclusive_cost(client: ClobClient, token_id: str, price: float, shares: float, raw_cost: float) -> float:
+def get_fee_per_share(client: ClobClient, token_id: str, price: float) -> float:
+    """Return Polymarket taker fee per share at given price. Falls back to 0.07 * p*(1-p)."""
     try:
         fee_rate = client.get_fee_rate_bps(token_id) / 10000.0
         fee_exp = client.get_fee_exponent(token_id)
-        platform_fee_rate = fee_rate * (price * (1.0 - price)) ** fee_exp
-        fee = shares * platform_fee_rate
+        return fee_rate * (price * (1.0 - price)) ** fee_exp
+    except Exception:
+        return 0.07 * (price * (1.0 - price))
+
+
+def get_net_profit_per_share(client: ClobClient, token_id: str, price: float) -> float:
+    """Return profit per share after Polymarket taker fee: (1 - price) - fee."""
+    return (1.0 - price) - get_fee_per_share(client, token_id, price)
+
+
+def estimate_fee_inclusive_buy_cost(
+    client: ClobClient,
+    token_id: str,
+    price: float,
+    shares: float,
+    raw_cost: float,
+) -> float:
+    """Return raw_cost + estimated Polymarket taker fee."""
+    try:
+        fee = shares * get_fee_per_share(client, token_id, price)
         return round(raw_cost + fee, 6)
     except Exception:
         return round(raw_cost * 1.015, 6)
+
+
+def apply_fee_cost_and_refresh_balance(client: ClobClient, bal_before: Optional[float], entry) -> Optional[float]:
+    """Estimate fee-inclusive cost for FILLED entry, then refresh balance snapshot."""
+    if entry is None or entry.status != "FILLED" or bal_before is None:
+        return None
+    try:
+        real_cost = estimate_fee_inclusive_buy_cost(client, entry.token, entry.limit_price, entry.shares, entry.cost)
+        if real_cost > 0:
+            entry.cost = real_cost
+        bal_after = get_balance(client)
+        return bal_after if bal_after is not None else round(max(bal_before - real_cost, 0.0), 6)
+    except Exception:
+        pass
+    return None
 
 
 def cancel_order(client: ClobClient, order_id: str) -> bool:

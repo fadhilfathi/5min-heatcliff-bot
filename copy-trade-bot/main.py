@@ -45,8 +45,10 @@ from executor import (
     get_tick_size,
     place_gtd_limit_order,
     redeem_position,
-    update_cost_from_balance,
-    get_fee_inclusive_cost,
+    apply_fee_cost_and_refresh_balance,
+    get_fee_per_share,
+    get_net_profit_per_share,
+    estimate_fee_inclusive_buy_cost,
 )
 from models import Entry
 from price_feed import get_btc_price
@@ -266,6 +268,13 @@ def main() -> int:
                             if entry.get("status") == "FILLED" and original_size > 0 and matched <= 0:
                                 entry["shares"] = original_size
 
+                            if entry.get("status") == "FILLED" and entry.get("token") and entry.get("limit_price"):
+                                raw_filled_cost = float(entry.get("shares", 0)) * float(entry.get("limit_price", 0))
+                                entry["cost"] = estimate_fee_inclusive_buy_cost(
+                                    client, str(entry["token"]), float(entry["limit_price"]),
+                                    float(entry.get("shares", 0)), raw_filled_cost,
+                                )
+
                     if entry.get("status") == "FILLED":
                         filled_entries += 1
                         entry_cost = float(entry.get("cost") or 0.0)
@@ -273,16 +282,19 @@ def main() -> int:
                         if resolved_side and entry.get("side") == resolved_side:
                             winning_shares += float(entry.get("shares") or 0.0)
 
+                pos["total_cost"] = round(total_cost, 6)
+
                 pnl = None
                 if resolved_side:
                     pnl = round(winning_shares - total_cost, 4)
                     pos["resolved_side"] = resolved_side
                     pos["pnl"] = pnl
                     pos["monitored"] = True
-                elif int(time.time()) > pos.get("monitor_at", 0) + 120:
-                    pos["monitored"] = True # hard fallback stop monitoring after 2 minutes
+                elif int(time.time()) > pos.get("closed_at", 0) + 150:
+                    LOG.warning("[MONITOR] event=timeout bucket=%s reason=no_resolution_after_150s", pos_ts)
+                    pos["monitored"] = True
                 else:
-                    pos["monitor_at"] = int(time.time()) + 10 # wait 10s and retry
+                    pos["monitor_at"] = int(time.time()) + 10
 
                 LOG.info(
                     "[MONITOR] event=post_settle bucket=%s resolved_side=%s filled_entries=%d total_entries=%d winning_shares=%.4f total_cost=%.4f pnl=%s",
@@ -294,10 +306,13 @@ def main() -> int:
                     total_cost,
                     f"{pnl:+.4f}" if pnl is not None else "unknown",
                 )
-                if pnl is None:
-                    ui.add_log(f"monitor bucket={pos_ts}: resolution pending, filled={filled_entries}/{total_entries}")
-                else:
+                if pnl is not None:
                     ui.add_log(f"monitor bucket={pos_ts}: {resolved_side} pnl=${pnl:+.4f} filled={filled_entries}/{total_entries}")
+                elif not pos.get("monitored"):
+                    last_log = pos.get("last_pending_log_at", 0)
+                    if now_ts - last_log >= 30:
+                        ui.add_log(f"monitor bucket={pos_ts}: resolution pending, filled={filled_entries}/{total_entries}")
+                        pos["last_pending_log_at"] = now_ts
 
             btc_price = get_btc_price()
             if btc_price is None:
@@ -372,18 +387,15 @@ def main() -> int:
                             hedge_limit_price = opp_ask + 0.01
                         hedge_limit_price = round(min(max(hedge_limit_price, 0.01), 0.99), 4)
 
-                        # Dynamically estimate the fee to ensure a 1% net profit target
-                        try:
-                            fee_rate = client.get_fee_rate_bps(opp_token) / 10000.0 if client else 0.07
-                            fee_exp = client.get_fee_exponent(opp_token) if client else 1.0
-                        except Exception:
-                            fee_rate, fee_exp = 0.07, 1.0
-                        
-                        true_profit_per_share = (1.0 - hedge_limit_price) - (fee_rate * (hedge_limit_price * (1.0 - hedge_limit_price)) ** fee_exp)
-                        true_profit_per_share = max(true_profit_per_share, 0.005) # safety minimum
+                        net_profit_per_share = get_net_profit_per_share(client, opp_token, hedge_limit_price) if client else (1.0 - hedge_limit_price) * 0.93
+                        net_profit_per_share = max(net_profit_per_share, 0.005)
+                        if net_profit_per_share < 0.005:
+                            LOG.info("[TRADE][HEDGE] event=skip bucket=%s reason=low_profit_per_share limit=%.4f npps=%.6f", current_bucket, hedge_limit_price, net_profit_per_share)
+                            time.sleep(0.05)
+                            continue
 
                         first_trade_cost = float(state["positions"][cb["ts"]]["entries"][0].get("cost", 0.0) or 0.0)
-                        hedge_shares = round(max((first_trade_cost * 1.01) / true_profit_per_share, 1.0), 4)
+                        hedge_shares = round(max((first_trade_cost * 1.01) / net_profit_per_share, 1.0), 4)
                         hedge_cost = round(hedge_shares * hedge_limit_price, 4)
                         ui.add_log(f"#{entry_number} HEDGE {opp_dir}: opp_ask={opp_ask:.4f} BTC_move=${cb['move']:+.2f} secs_left={secs_left}")
                         if not args.live:
@@ -416,10 +428,10 @@ def main() -> int:
                             hedge_shares = affordable_shares
                             hedge_cost = round(hedge_shares * hedge_limit_price, 4)
                             LOG.info(
-                                "[RISK] event=hedge_resize bucket=%s balance=%.4f budget=%.4f shares=%.4f cost=%.4f",
+                                "[RISK] event=hedge_resize bucket=%s balance=%.4f budget=%.4f shares=%.4f cost=%.4f target_1pct_not_guaranteed=true",
                                 current_bucket, bal, affordable_budget, hedge_shares, hedge_cost
                             )
-                            ui.add_log(f"partial hedge: balance cap sh={hedge_shares:.4f} cost=${hedge_cost:.4f}")
+                            ui.add_log(f"partial hedge: 1% target not guaranteed, balance cap sh={hedge_shares:.4f} cost=${hedge_cost:.4f}")
                         tick_size = get_tick_size(client, opp_token)
                         entry, outcome = place_gtd_limit_order(client, current_bucket, opp_token, opp_ask, tick_size, shares=hedge_shares, limit_price=hedge_limit_price)
                         if entry is None:
@@ -430,7 +442,7 @@ def main() -> int:
                             ui.add_log(f"hedge failed: {outcome}")
                             time.sleep(0.05)
                             continue
-                        bal_after = update_cost_from_balance(client, bal, entry)
+                        bal_after = apply_fee_cost_and_refresh_balance(client, bal, entry)
                         if bal_after is not None:
                             state["_meta"]["balance"] = bal_after
                         cb["entries"] += 1
@@ -440,7 +452,6 @@ def main() -> int:
                         state["positions"][cb_ts]["entries"].append({"side": opp_dir, "move": cb["move"], "ask": opp_ask, "limit_price": entry.limit_price, "shares": entry.shares, "cost": entry.cost, "status": entry.status, "order_id": entry.order_id})
                         state["positions"][cb_ts]["total_cost"] += entry.cost
                         state["positions"][cb_ts]["total_shares"] += entry.shares
-                        state["_meta"]["balance"] = bal if bal is not None else state["_meta"]["balance"]
                         LOG.info(
                             "[TRADE][HEDGE] event=placed bucket=%s dir=%s entry=%d status=%s limit=%.4f shares=%.4f cost=%.4f order_id=%s",
                             current_bucket, entry.side, entry_number, entry.status, entry.limit_price, entry.shares, entry.cost, entry.order_id[:10]
@@ -484,17 +495,9 @@ def main() -> int:
                             hedge2_limit_price = orig_ask + 0.01
                         hedge2_limit_price = round(min(max(hedge2_limit_price, 0.01), 0.99), 4)
 
-                        try:
-                            fee_rate2 = client.get_fee_rate_bps(hedge2_token) / 10000.0 if client else 0.07
-                            fee_exp2 = client.get_fee_exponent(hedge2_token) if client else 1.0
-                        except Exception:
-                            fee_rate2, fee_exp2 = 0.07, 1.0
-                            
-                        true_profit_per_share2 = (1.0 - hedge2_limit_price) - (fee_rate2 * (hedge2_limit_price * (1.0 - hedge2_limit_price)) ** fee_exp2)
-                        
-                        denom = true_profit_per_share2
-                        if denom <= 0.005:
-                            LOG.info("[TRADE][HEDGE2] event=skip bucket=%s reason=non_positive_denom limit=%.4f", current_bucket, hedge2_limit_price)
+                        net_profit_per_share2 = get_net_profit_per_share(client, hedge2_token, hedge2_limit_price) if client else (1.0 - hedge2_limit_price) * 0.93
+                        if net_profit_per_share2 < 0.005:
+                            LOG.info("[TRADE][HEDGE2] event=skip bucket=%s reason=low_profit_per_share limit=%.4f npps=%.6f", current_bucket, hedge2_limit_price, net_profit_per_share2)
                             time.sleep(0.05)
                             continue
 
@@ -503,8 +506,9 @@ def main() -> int:
                         first_trade_cost = float(first_entry.get("cost", 0.0) or 0.0)
                         first_trade_shares = float(first_entry.get("shares", 0.0) or 0.0)
                         first_hedge_cost = float(second_entry.get("cost", 0.0) or 0.0)
-                        
-                        hedge2_shares = round(max(((1.01 * (first_trade_cost + first_hedge_cost)) - first_trade_shares) / denom, 1.0), 4)
+
+                        target_recovery = (1.01 * (first_trade_cost + first_hedge_cost)) - first_trade_shares
+                        hedge2_shares = round(max(target_recovery / net_profit_per_share2, 1.0), 4)
                         hedge2_cost = round(hedge2_shares * hedge2_limit_price, 4)
                         ui.add_log(f"#{entry_number} HEDGE2 {orig_dir}: ask={orig_ask:.4f} BTC_move=${cb['move']:+.2f} secs_left={secs_left}")
 
@@ -540,10 +544,10 @@ def main() -> int:
                             hedge2_shares = affordable_shares
                             hedge2_cost = round(hedge2_shares * hedge2_limit_price, 4)
                             LOG.info(
-                                "[RISK] event=hedge2_resize bucket=%s balance=%.4f budget=%.4f shares=%.4f cost=%.4f",
+                                "[RISK] event=hedge2_resize bucket=%s balance=%.4f budget=%.4f shares=%.4f cost=%.4f target_1pct_not_guaranteed=true",
                                 current_bucket, bal, affordable_budget, hedge2_shares, hedge2_cost
                             )
-                            ui.add_log(f"partial hedge2: balance cap sh={hedge2_shares:.4f} cost=${hedge2_cost:.4f}")
+                            ui.add_log(f"partial hedge2: 1% target not guaranteed, balance cap sh={hedge2_shares:.4f} cost=${hedge2_cost:.4f}")
 
                         tick_size = get_tick_size(client, hedge2_token)
                         entry, outcome = place_gtd_limit_order(client, current_bucket, hedge2_token, orig_ask, tick_size, shares=hedge2_shares, limit_price=hedge2_limit_price)
@@ -556,7 +560,7 @@ def main() -> int:
                             time.sleep(0.05)
                             continue
 
-                        bal_after = update_cost_from_balance(client, bal, entry)
+                        bal_after = apply_fee_cost_and_refresh_balance(client, bal, entry)
                         if bal_after is not None:
                             state["_meta"]["balance"] = bal_after
 
@@ -567,7 +571,6 @@ def main() -> int:
                         state["positions"][cb_ts]["entries"].append({"side": orig_dir, "move": cb["move"], "ask": orig_ask, "limit_price": entry.limit_price, "shares": entry.shares, "cost": entry.cost, "status": entry.status, "order_id": entry.order_id})
                         state["positions"][cb_ts]["total_cost"] += entry.cost
                         state["positions"][cb_ts]["total_shares"] += entry.shares
-                        state["_meta"]["balance"] = bal if bal is not None else state["_meta"]["balance"]
                         LOG.info(
                             "[TRADE][HEDGE2] event=placed bucket=%s dir=%s entry=%d status=%s limit=%.4f shares=%.4f cost=%.4f order_id=%s",
                             current_bucket, orig_dir, entry_number, entry.status, entry.limit_price, entry.shares, entry.cost, entry.order_id[:10]
@@ -693,7 +696,7 @@ def main() -> int:
                 time.sleep(0.05)
                 continue
 
-            bal_after = update_cost_from_balance(client, bal, entry)
+            bal_after = apply_fee_cost_and_refresh_balance(client, bal, entry)
             if bal_after is not None:
                 state["_meta"]["balance"] = bal_after
 
@@ -725,7 +728,6 @@ def main() -> int:
             state["positions"][cb_ts]["total_cost"] += entry.cost
             state["positions"][cb_ts]["total_shares"] += entry.shares
             cb["best_abs_move"] = move_abs
-            state["_meta"]["balance"] = bal if bal is not None else state["_meta"]["balance"]
             LOG.info(
                 "[TRADE][ENTRY] event=placed bucket=%s dir=%s entry=%d status=%s limit=%.4f shares=%.4f cost=%.4f order_id=%s",
                 current_bucket, entry.side, entry_number, entry.status, entry.limit_price, entry.shares, entry.cost, entry.order_id[:10]
