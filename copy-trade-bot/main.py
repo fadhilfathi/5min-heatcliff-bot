@@ -37,6 +37,8 @@ from executor import (
     auth_client,
     cancel_order,
     fetch_condition_id,
+    get_market_resolution,
+    get_order_status,
     get_balance,
     get_tick_size,
     place_gtd_limit_order,
@@ -209,6 +211,13 @@ def main() -> int:
                 if secs <= 0:
                     pos["status"] = "SETTLED"
                     pos["closed_at"] = now_ts
+                    pos["monitor_at"] = now_ts + 30
+                    pos["monitored"] = False
+                    if args.live and client is not None:
+                        for entry in pos.get("entries", []):
+                            if entry.get("status") == "RESTING" and entry.get("order_id"):
+                                if cancel_order(client, str(entry["order_id"])):
+                                    entry["status"] = "CANCELLED"
                     LOG.info(
                         "[SETTLE] event=settled bucket=%s dir=%s entries=%d total_cost=%.4f closed_at=%d",
                         pos_ts,
@@ -218,6 +227,68 @@ def main() -> int:
                         now_ts,
                     )
                     ui.add_log(f"settled bucket={pos_ts} side={pos['direction']} entries={len(pos['entries'])}")
+
+            for pos_ts in list(state["positions"].keys()):
+                pos = state["positions"][pos_ts]
+                if pos.get("status") != "SETTLED" or pos.get("monitored"):
+                    continue
+                if now_ts < int(pos.get("monitor_at") or 0):
+                    continue
+
+                resolved_side = get_market_resolution(pos_ts)
+                filled_entries = 0
+                total_entries = len(pos.get("entries", []))
+                total_cost = 0.0
+                winning_shares = 0.0
+
+                for entry in pos.get("entries", []):
+                    order_id = str(entry.get("order_id") or "")
+                    if args.live and client is not None and order_id:
+                        order_data = get_order_status(client, order_id)
+                        if isinstance(order_data, dict):
+                            status_text = str(order_data.get("status") or "").lower()
+                            matched = float(order_data.get("size_matched") or 0.0)
+                            original_size = float(order_data.get("original_size") or entry.get("shares") or 0.0)
+                            if matched > 0 or status_text in {"matched", "filled"}:
+                                entry["status"] = "FILLED"
+                                if matched > 0:
+                                    entry["shares"] = matched
+                            elif status_text in {"canceled", "cancelled"}:
+                                entry["status"] = "CANCELLED"
+                            elif status_text in {"expired", "unmatched"}:
+                                entry["status"] = "EXPIRED"
+                            elif status_text == "live":
+                                entry["status"] = "RESTING"
+                            if entry.get("status") == "FILLED" and original_size > 0 and matched <= 0:
+                                entry["shares"] = original_size
+
+                    if entry.get("status") == "FILLED":
+                        filled_entries += 1
+                        entry_cost = float(entry.get("cost") or 0.0)
+                        total_cost += entry_cost
+                        if resolved_side and entry.get("side") == resolved_side:
+                            winning_shares += float(entry.get("shares") or 0.0)
+
+                pnl = None
+                if resolved_side:
+                    pnl = round(winning_shares - total_cost, 4)
+                    pos["resolved_side"] = resolved_side
+                    pos["pnl"] = pnl
+                pos["monitored"] = True
+                LOG.info(
+                    "[MONITOR] event=post_settle bucket=%s resolved_side=%s filled_entries=%d total_entries=%d winning_shares=%.4f total_cost=%.4f pnl=%s",
+                    pos_ts,
+                    resolved_side or "unknown",
+                    filled_entries,
+                    total_entries,
+                    winning_shares,
+                    total_cost,
+                    f"{pnl:+.4f}" if pnl is not None else "unknown",
+                )
+                if pnl is None:
+                    ui.add_log(f"monitor bucket={pos_ts}: resolution pending, filled={filled_entries}/{total_entries}")
+                else:
+                    ui.add_log(f"monitor bucket={pos_ts}: {resolved_side} pnl=${pnl:+.4f} filled={filled_entries}/{total_entries}")
 
             btc_price = get_btc_price()
             if btc_price is None:
@@ -234,6 +305,7 @@ def main() -> int:
                 cb["direction"] = ""
                 cb["entries"] = 0
                 cb["best_abs_move"] = 0.0
+                cb["hedged"] = False
                 up_token, down_token = _get_btc_tokens()
                 if not up_token or not down_token:
                     LOG.warning("[STATE] event=bucket_open_missing_tokens bucket=%s btc_open=%.2f", current_bucket, btc_price)
@@ -258,7 +330,8 @@ def main() -> int:
 
             # HEDGE: if opposite ask is rich or BTC has flipped far enough, buy opposite to recover.
             if (cb["entries"] > 0
-                    and cb["ts"] in state["positions"]):
+                    and cb["ts"] in state["positions"]
+                    and not cb.get("hedged", False)):
                 pos_dir = state["positions"][cb["ts"]].get("direction", "")
                 if pos_dir:
                     opp_dir = "UP" if pos_dir == "DOWN" else "DOWN"
@@ -288,7 +361,7 @@ def main() -> int:
                             hedge_limit_price = opp_ask - 0.01
                         else:
                             hedge_limit_price = opp_ask + 0.01
-                        hedge_limit_price = round(max(hedge_limit_price, 0.01), 4)
+                        hedge_limit_price = round(min(max(hedge_limit_price, 0.01), 0.99), 4)
                         hedge_profit_per_share = max(1.0 - hedge_limit_price, 0.01)
                         first_trade_cost = float(state["positions"][cb["ts"]]["entries"][0].get("cost", 0.0) or 0.0)
                         hedge_shares = round(max(first_trade_cost / hedge_profit_per_share, 1.0), 4)
@@ -338,9 +411,10 @@ def main() -> int:
                             time.sleep(0.05)
                             continue
                         cb["entries"] += 1
+                        cb["hedged"] = True
                         state["_meta"]["entry_count"] += 1
                         cb_ts = cb["ts"]
-                        state["positions"][cb_ts]["entries"].append({"side": entry.side, "move": cb["move"], "ask": opp_ask, "limit_price": entry.limit_price, "shares": entry.shares, "cost": entry.cost, "status": entry.status, "order_id": entry.order_id})
+                        state["positions"][cb_ts]["entries"].append({"side": opp_dir, "move": cb["move"], "ask": opp_ask, "limit_price": entry.limit_price, "shares": entry.shares, "cost": entry.cost, "status": entry.status, "order_id": entry.order_id})
                         state["positions"][cb_ts]["total_cost"] += entry.cost
                         state["positions"][cb_ts]["total_shares"] += entry.shares
                         state["_meta"]["balance"] = bal if bal is not None else state["_meta"]["balance"]
@@ -348,6 +422,8 @@ def main() -> int:
                             "[TRADE][HEDGE] event=placed bucket=%s dir=%s entry=%d status=%s limit=%.4f shares=%.4f cost=%.4f order_id=%s",
                             current_bucket, entry.side, entry_number, entry.status, entry.limit_price, entry.shares, entry.cost, entry.order_id[:10]
                         )
+                        if entry.status == "RESTING":
+                            LOG.info("[MONITOR] event=watch_order bucket=%s order_id=%s status=RESTING kind=hedge", current_bucket, entry.order_id[:10])
                         ui.add_log(f"#{entry_number} HEDGE {entry.status}: {entry.side} sh={entry.shares:.4f} limit={entry.limit_price:.4f} cost=${entry.cost:.4f} order={entry.order_id[:10]}")
                         time.sleep(GTD_ENTRY_DELAY_SECONDS)
                         continue
@@ -483,7 +559,7 @@ def main() -> int:
                     "btc_now": cb["btc_now"],
                 }
             state["positions"][cb_ts]["entries"].append({
-                "side": entry.side,
+                "side": cb["direction"],
                 "move": cb["move"],
                 "ask": ask,
                 "limit_price": entry.limit_price,
@@ -500,6 +576,8 @@ def main() -> int:
                 "[TRADE][ENTRY] event=placed bucket=%s dir=%s entry=%d status=%s limit=%.4f shares=%.4f cost=%.4f order_id=%s",
                 current_bucket, entry.side, entry_number, entry.status, entry.limit_price, entry.shares, entry.cost, entry.order_id[:10]
             )
+            if entry.status == "RESTING":
+                LOG.info("[MONITOR] event=watch_order bucket=%s order_id=%s status=RESTING kind=entry", current_bucket, entry.order_id[:10])
             ui.add_log(
                 f"#{entry_number} {entry.status}: {entry.side} sh={entry.shares:.4f} "
                 f"limit={entry.limit_price:.4f} cost=${entry.cost:.4f} order={entry.order_id[:10]}"

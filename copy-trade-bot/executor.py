@@ -5,7 +5,9 @@ import os
 import time
 from typing import Optional
 
-from config import CLOB_BASE_URL, STAKE_USD_PER_ENTRY, GTD_ENTRY_DELAY_SECONDS
+import requests
+
+from config import CLOB_BASE_URL, GAMMA_EVENTS_URL, GTD_ENTRY_DELAY_SECONDS, GTD_EXPIRY_OFFSET, STAKE_USD_PER_ENTRY
 from models import Entry
 
 from py_clob_client_v2.client import ClobClient
@@ -14,6 +16,7 @@ from py_clob_client_v2.clob_types import (
     AssetType,
     BalanceAllowanceParams,
     OrderArgsV2,
+    OrderPayload,
     OrderType,
 )
 
@@ -191,7 +194,7 @@ def place_gtd_limit_order(
     token: str,
     ask_price: float,
     tick_size: float,
-    expiration_offset: int = 60,
+    expiration_offset: int | None = None,
     shares: float = 1.0,
     limit_price: float | None = None,
 ) -> tuple[Optional[Entry], str]:
@@ -205,7 +208,12 @@ def place_gtd_limit_order(
     limit_price = round(max(limit_price, 0.01), 4)
     shares = round(max(shares, 1.0), 4)
     cost = round(shares * limit_price, 6)
-    expiration_ts = int(time.time()) + 600
+    if expiration_offset is None:
+        expiration_offset = GTD_EXPIRY_OFFSET
+    expiration_ts = max(
+        bucket_ts + 300 + expiration_offset + 60,
+        int(time.time()) + 181,
+    )
 
     LOG.info("[ORDER] event=submit bucket=%s token=%s side=BUY ask=%.4f limit=%.4f shares=%.4f expiration=%d", bucket_ts, token[:8], ask_price, limit_price, shares, expiration_ts)
 
@@ -264,9 +272,60 @@ def cancel_order(client: ClobClient, order_id: str) -> bool:
         return False
     LOG.info("[ORDER] event=cancel_request order_id=%s", order_id[:10])
     try:
-        client.cancel_order(order_id)
+        client.cancel_order(OrderPayload(orderID=order_id))
         LOG.info("[ORDER] event=cancelled order_id=%s", order_id[:10])
         return True
     except Exception as exc:
         LOG.warning("[ORDER] event=cancel_failed order_id=%s error=%r", order_id[:10], exc)
         return False
+
+
+def get_order_status(client: ClobClient, order_id: str) -> Optional[dict]:
+    if not order_id:
+        return None
+    try:
+        return client.get_order(order_id)
+    except Exception as exc:
+        LOG.warning("[ORDER] event=status_failed order_id=%s error=%r", order_id[:10], exc)
+        return None
+
+
+def get_market_resolution(bucket_ts: int) -> Optional[str]:
+    slug = f"btc-updown-5m-{bucket_ts}"
+    try:
+        resp = requests.get(GAMMA_EVENTS_URL, params={"slug": slug}, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        if not data or not data[0].get("markets"):
+            return None
+        market = data[0]["markets"][0]
+        if not bool(market.get("closed")):
+            return None
+        winner = str(market.get("winner") or market.get("winningOutcome") or "").upper()
+        if winner in {"UP", "DOWN"}:
+            return winner
+        outcome_prices = market.get("outcomePrices") or []
+        outcomes = market.get("outcomes") or []
+        if isinstance(outcomes, str):
+            import json
+            outcomes = json.loads(outcomes)
+        if isinstance(outcome_prices, str):
+            import json
+            outcome_prices = json.loads(outcome_prices)
+        if len(outcomes) >= 2 and len(outcome_prices) >= 2:
+            try:
+                prices = [float(x) for x in outcome_prices[:2]]
+                idx = -1
+                if prices[0] == 1.0 and prices[1] == 0.0:
+                    idx = 0
+                elif prices[1] == 1.0 and prices[0] == 0.0:
+                    idx = 1
+                if idx >= 0:
+                    guess = str(outcomes[idx]).upper()
+                    if guess in {"UP", "DOWN"}:
+                        return guess
+            except (TypeError, ValueError):
+                return None
+    except Exception as exc:
+        LOG.warning("[SETTLE] event=resolution_failed bucket=%s error=%r", bucket_ts, exc)
+    return None

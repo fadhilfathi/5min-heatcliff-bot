@@ -5,7 +5,7 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parents[1]
 LOG_DIR = ROOT_DIR / "logs-copy-trade"
 
-BTC_MOVE_THRESHOLD = 50.0
+BTC_MOVE_THRESHOLD = 67.0
 SCALE_MOVE_THRESHOLD = 30.0
 STAKE_USD_PER_ENTRY = 0.50
 FLIP_MOVE_THRESHOLD = 20.0
@@ -16,7 +16,8 @@ MAX_ENTRIES_PER_BUCKET = 1
 MAX_CONCURRENT_BUCKETS = 2
 MAX_SESSION_LOSS_USD = 99999.0
 MIN_SECONDS_LEFT = 5
-GTD_EXPIRY_OFFSET = 60
+# seconds after bucket close that GTD effectively dies; Polymarket subtracts 60s internally
+GTD_EXPIRY_OFFSET = 30
 
 CLOB_URL = "https://clob.polymarket.com"
 CLOB_BASE_URL = "https://clob.polymarket.com"

@@ -102,6 +102,7 @@ class CopyTradeUI:
             ("Limit$", 7, "right"),
             ("Shares", 7, "right"),
             ("Cost", 7, "right"),
+            ("PnL", 7, "right"),
             ("Status", 12, "left"),
             ("Secs", 5, "right"),
         ):
@@ -121,6 +122,7 @@ class CopyTradeUI:
                 _fmt(last.get("limit_price")),
                 _fmt(pos.get("total_shares")),
                 _fmt(pos.get("total_cost")),
+                _fmt(pos.get("pnl")),
                 f"[{status_color}]{pos.get('status','')}[/{status_color}]",
                 str(pos.get("secs_left", "-")),
             )
