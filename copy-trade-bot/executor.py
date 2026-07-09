@@ -163,6 +163,20 @@ def get_balance(client: ClobClient) -> Optional[float]:
     return None
 
 
+def update_cost_from_balance(client: ClobClient, bal_before: Optional[float], entry) -> Optional[float]:
+    if entry is None or entry.status != "FILLED" or bal_before is None:
+        return None
+    try:
+        real_cost = get_fee_inclusive_cost(client, entry.token, entry.limit_price, entry.shares, entry.cost)
+        if real_cost > 0:
+            entry.cost = real_cost
+        # Try to get post-trade balance natively without blocking
+        bal_after = get_balance(client)
+        return bal_after if bal_after is not None else round(max(bal_before - real_cost, 0.0), 6)
+    except Exception:
+        pass
+    return None
+
 def _human(raw) -> float:
     try:
         val = float(raw or 0)
@@ -265,6 +279,17 @@ def place_gtd_limit_order(
         bucket_ts, token[:8], status, order_id[:10], entry.limit_price, entry.shares, entry.cost
     )
     return entry, "placed"
+
+
+def get_fee_inclusive_cost(client: ClobClient, token_id: str, price: float, shares: float, raw_cost: float) -> float:
+    try:
+        fee_rate = client.get_fee_rate_bps(token_id) / 10000.0
+        fee_exp = client.get_fee_exponent(token_id)
+        platform_fee_rate = fee_rate * (price * (1.0 - price)) ** fee_exp
+        fee = shares * platform_fee_rate
+        return round(raw_cost + fee, 6)
+    except Exception:
+        return round(raw_cost * 1.015, 6)
 
 
 def cancel_order(client: ClobClient, order_id: str) -> bool:
