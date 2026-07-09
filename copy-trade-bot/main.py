@@ -290,9 +290,6 @@ def main() -> int:
                     pos["resolved_side"] = resolved_side
                     pos["pnl"] = pnl
                     pos["monitored"] = True
-                elif int(time.time()) > pos.get("closed_at", 0) + 150:
-                    LOG.warning("[MONITOR] event=timeout bucket=%s reason=no_resolution_after_150s", pos_ts)
-                    pos["monitored"] = True
                 else:
                     pos["monitor_at"] = int(time.time()) + 10
 
@@ -310,7 +307,7 @@ def main() -> int:
                     ui.add_log(f"monitor bucket={pos_ts}: {resolved_side} pnl=${pnl:+.4f} filled={filled_entries}/{total_entries}")
                 elif not pos.get("monitored"):
                     last_log = pos.get("last_pending_log_at", 0)
-                    if now_ts - last_log >= 30:
+                    if now_ts - last_log >= 60:
                         ui.add_log(f"monitor bucket={pos_ts}: resolution pending, filled={filled_entries}/{total_entries}")
                         pos["last_pending_log_at"] = now_ts
 
