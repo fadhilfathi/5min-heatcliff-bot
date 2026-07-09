@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections import deque
@@ -10,6 +11,8 @@ from rich.layout import Layout
 from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
+
+LOG = logging.getLogger("copy_tui")
 
 
 class CopyTradeUI:
@@ -25,9 +28,11 @@ class CopyTradeUI:
         self.logs.appendleft(f"[{time.strftime('%H:%M:%S')}] {message}")
 
     def stop(self) -> None:
+        LOG.info("[UI] event=stop")
         self._stopped = True
 
     def start(self) -> None:
+        LOG.info("[UI] event=start")
         threading.Thread(target=self._kb_thread, daemon=True).start()
         with Live(self._render(), refresh_per_second=4, screen=True) as live:
             while not self._stopped and not self.control.get("quit"):
@@ -35,17 +40,22 @@ class CopyTradeUI:
                 live.update(self._render())
 
     def _kb_thread(self) -> None:
+        LOG.debug("[UI] event=keyboard_thread_start")
         try:
             import msvcrt
             while not self._stopped and not self.control.get("quit"):
                 if msvcrt.kbhit():
                     ch = msvcrt.getch().decode("utf-8", errors="ignore").lower()
                     if ch == "q":
+                        LOG.warning("[CONTROL] event=quit_requested source=keyboard")
                         self.control["quit"] = True
                     elif ch == "p":
-                        self.control["paused"] = not bool(self.control.get("paused"))
+                        new_state = not bool(self.control.get("paused"))
+                        LOG.info("[CONTROL] event=pause state=%s", str(new_state).lower())
+                        self.control["paused"] = new_state
                 time.sleep(0.05)
-        except Exception:
+        except Exception as exc:
+            LOG.warning("[ERROR] event=ui_thread_error error=%r", exc)
             return
 
     def _render(self):
