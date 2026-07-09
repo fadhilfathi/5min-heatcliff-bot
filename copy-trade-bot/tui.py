@@ -82,7 +82,6 @@ class CopyTradeUI:
 
         layout["header"].update(
             Panel(
-                f"[bold green]BTC Momentum Bot[/bold green] "
                 f"Mode=[cyan]{meta['mode']}[/cyan] "
                 f"BTC=[cyan]${btc_price:,.2f}[/cyan] "
                 f"Move=[{move_color}]{move_str}[/{move_color}] "
@@ -90,8 +89,7 @@ class CopyTradeUI:
                 f"Best=[cyan]${cb.get('best_abs_move', 0):,.2f}[/cyan] "
                 f"Bal=[cyan]${meta.get('balance', 0):.2f}[/cyan] "
                 f"PnL=[{pnl_color}]${pnl:+.4f}[/{pnl_color}] "
-                f"Entries=[cyan]{meta.get('entry_count', 0)}[/cyan] "
-                f"Poll=[cyan]{meta.get('poll_count', 0)}[/cyan] "
+                f"Ent=[cyan]{meta.get('entry_count', 0)}[/cyan] "
                 f"[dim]q=quit p=pause[/dim]"
             )
         )
@@ -128,7 +126,7 @@ class CopyTradeUI:
             )
         layout["body"].update(table)
         logs = "\n".join(self.logs) if self.logs else "No events yet"
-        layout["footer"].update(Panel(logs, title=f"Recent  Runtime={runtime}"))
+        layout["footer"].update(Panel(logs, title=f"Recent  Runtime={runtime}  Poll={meta.get('poll_count', 0)}"))
         return layout
 
 
