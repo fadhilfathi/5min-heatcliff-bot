@@ -371,6 +371,10 @@ def main() -> int:
                         (pos_dir == "UP" and cb["move"] <= -HEDGE_OPPOSITE_MOVE_THRESHOLD)
                     )
                     ask_ready = opp_ask >= HEDGE_OPPOSITE_ASK_THRESHOLD
+                    LOG.debug(
+                        "[TRADE][HEDGE] event=check bucket=%s from=%s to=%s opp_ask=%.4f ask_ready=%s(>=%.2f) move=%+.2f move_ready=%s(>=%.1f) secs_left=%d",
+                        current_bucket, pos_dir, opp_dir, opp_ask, ask_ready, HEDGE_OPPOSITE_ASK_THRESHOLD, cb["move"], move_flip_ready, HEDGE_OPPOSITE_MOVE_THRESHOLD, secs_left,
+                    )
                     if ask_ready or move_flip_ready:
                         LOG.info(
                             "[TRADE][HEDGE] event=trigger bucket=%s from=%s to=%s opp_ask=%.4f ask_ready=%s move=%+.2f move_ready=%s secs_left=%d",
@@ -394,6 +398,10 @@ def main() -> int:
                         first_trade_cost = float(state["positions"][cb["ts"]]["entries"][0].get("cost", 0.0) or 0.0)
                         hedge_shares = round(max((first_trade_cost * 1.01) / net_profit_per_share, 1.0), 4)
                         hedge_cost = round(hedge_shares * hedge_limit_price, 4)
+                        LOG.info(
+                            "[TRADE][HEDGE] event=sizing bucket=%s dir=%s first_cost=%.4f limit=%.4f npps=%.6f required_shares=%.4f required_cost=%.4f",
+                            current_bucket, opp_dir, first_trade_cost, hedge_limit_price, net_profit_per_share, hedge_shares, hedge_cost,
+                        )
                         ui.add_log(f"#{entry_number} HEDGE {opp_dir}: opp_ask={opp_ask:.4f} BTC_move=${cb['move']:+.2f} secs_left={secs_left}")
                         if not args.live:
                             LOG.info(
@@ -507,6 +515,10 @@ def main() -> int:
                         target_recovery = (1.01 * (first_trade_cost + first_hedge_cost)) - first_trade_shares
                         hedge2_shares = round(max(target_recovery / net_profit_per_share2, 1.0), 4)
                         hedge2_cost = round(hedge2_shares * hedge2_limit_price, 4)
+                        LOG.info(
+                            "[TRADE][HEDGE2] event=sizing bucket=%s dir=%s first_cost=%.4f hedge1_cost=%.4f first_shares=%.4f limit=%.4f npps=%.6f target_recovery=%.4f required_shares=%.4f required_cost=%.4f",
+                            current_bucket, orig_dir, first_trade_cost, first_hedge_cost, first_trade_shares, hedge2_limit_price, net_profit_per_share2, target_recovery, hedge2_shares, hedge2_cost,
+                        )
                         ui.add_log(f"#{entry_number} HEDGE2 {orig_dir}: ask={orig_ask:.4f} BTC_move=${cb['move']:+.2f} secs_left={secs_left}")
 
                         if not args.live:
