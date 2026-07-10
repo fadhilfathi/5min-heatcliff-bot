@@ -142,6 +142,7 @@ async def _ws_loop() -> None:
                     })
                     await ws.send(msg)
                     _subscribed_ids = set(current_desired)
+                    _cache.prune(current_desired)
                     _sub_dirty.clear()
                     LOG.info("[POLY_WS] event=subscribed tokens=%d", len(current_desired))
 
@@ -149,19 +150,12 @@ async def _ws_loop() -> None:
 
                 while True:
                     if _sub_dirty.is_set():
+                        _sub_dirty.clear()
                         with _sub_lock:
                             current_desired = set(_desired_ids)
                         if current_desired != _subscribed_ids:
-                            msg = json.dumps({
-                                "assets_ids": list(current_desired),
-                                "type": "market",
-                                "custom_feature_enabled": True,
-                            })
-                            await ws.send(msg)
-                            _subscribed_ids = set(current_desired)
-                            _cache.prune(current_desired)
-                            LOG.info("[POLY_WS] event=resubscribed tokens=%d", len(_subscribed_ids))
-                        _sub_dirty.clear()
+                            LOG.info("[POLY_WS] event=force_reconnect reason=subscription_change tokens=%d", len(current_desired))
+                            break
 
                     try:
                         raw = await asyncio.wait_for(ws.recv(), timeout=2)
