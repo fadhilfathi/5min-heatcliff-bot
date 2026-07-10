@@ -59,6 +59,12 @@ class _BookCache:
                 return f"stale({age:.1f}s)"
             return f"fresh({age:.1f}s)"
 
+    def prune(self, keep: set[str]) -> None:
+        with self._lock:
+            for token_id in list(self._data.keys()):
+                if token_id not in keep:
+                    del self._data[token_id]
+
     def stats(self) -> dict:
         with self._lock:
             now = time.time()
@@ -145,26 +151,16 @@ async def _ws_loop() -> None:
                     if _sub_dirty.is_set():
                         with _sub_lock:
                             current_desired = set(_desired_ids)
-                        new_ids = current_desired - _subscribed_ids
-                        remove_ids = _subscribed_ids - current_desired
-                        if new_ids or remove_ids:
-                            if new_ids:
-                                msg = json.dumps({
-                                    "assets_ids": list(new_ids),
-                                    "type": "market",
-                                    "custom_feature_enabled": True,
-                                })
-                                await ws.send(msg)
-                            if remove_ids:
-                                msg = json.dumps({
-                                    "assets_ids": list(remove_ids),
-                                    "type": "market",
-                                    "custom_feature_enabled": True,
-                                    "unsubscribe": True,
-                                })
-                                await ws.send(msg)
+                        if current_desired != _subscribed_ids:
+                            msg = json.dumps({
+                                "assets_ids": list(current_desired),
+                                "type": "market",
+                                "custom_feature_enabled": True,
+                            })
+                            await ws.send(msg)
                             _subscribed_ids = set(current_desired)
-                            LOG.info("[POLY_WS] event=resubscribed new=%d removed=%d total=%d", len(new_ids), len(remove_ids), len(_subscribed_ids))
+                            _cache.prune(current_desired)
+                            LOG.info("[POLY_WS] event=resubscribed tokens=%d", len(_subscribed_ids))
                         _sub_dirty.clear()
 
                     try:
