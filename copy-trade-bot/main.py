@@ -451,11 +451,11 @@ def main() -> int:
                         state["positions"][cb_ts]["total_shares"] += entry.shares
                         LOG.info(
                             "[TRADE][HEDGE] event=placed bucket=%s dir=%s entry=%d status=%s limit=%.4f shares=%.4f cost=%.4f order_id=%s",
-                            current_bucket, entry.side, entry_number, entry.status, entry.limit_price, entry.shares, entry.cost, entry.order_id[:10]
+                            current_bucket, opp_dir, entry_number, entry.status, entry.limit_price, entry.shares, entry.cost, entry.order_id[:10]
                         )
                         if entry.status == "RESTING":
                             LOG.info("[MONITOR] event=watch_order bucket=%s order_id=%s status=RESTING kind=hedge", current_bucket, entry.order_id[:10])
-                        ui.add_log(f"#{entry_number} HEDGE {entry.status}: {entry.side} sh={entry.shares:.4f} limit={entry.limit_price:.4f} cost=${entry.cost:.4f} order={entry.order_id[:10]}")
+                        ui.add_log(f"#{entry_number} HEDGE {entry.status}: {opp_dir} sh={entry.shares:.4f} limit={entry.limit_price:.4f} cost=${entry.cost:.4f} order={entry.order_id[:10]}")
                         time.sleep(GTD_ENTRY_DELAY_SECONDS)
                         continue
 
@@ -727,12 +727,12 @@ def main() -> int:
             cb["best_abs_move"] = move_abs
             LOG.info(
                 "[TRADE][ENTRY] event=placed bucket=%s dir=%s entry=%d status=%s limit=%.4f shares=%.4f cost=%.4f order_id=%s",
-                current_bucket, entry.side, entry_number, entry.status, entry.limit_price, entry.shares, entry.cost, entry.order_id[:10]
+                current_bucket, cb["direction"], entry_number, entry.status, entry.limit_price, entry.shares, entry.cost, entry.order_id[:10]
             )
             if entry.status == "RESTING":
                 LOG.info("[MONITOR] event=watch_order bucket=%s order_id=%s status=RESTING kind=entry", current_bucket, entry.order_id[:10])
             ui.add_log(
-                f"#{entry_number} {entry.status}: {entry.side} sh={entry.shares:.4f} "
+                f"#{entry_number} {entry.status}: {cb['direction']} sh={entry.shares:.4f} "
                 f"limit={entry.limit_price:.4f} cost=${entry.cost:.4f} order={entry.order_id[:10]}"
             )
             time.sleep(GTD_ENTRY_DELAY_SECONDS)
