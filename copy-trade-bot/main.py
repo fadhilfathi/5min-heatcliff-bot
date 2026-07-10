@@ -382,7 +382,7 @@ def main() -> int:
 
                     _, opp_ask = poly_book_ws.get_best_prices(opp_token)
                     if opp_ask <= 0:
-                        LOG.info("[TRADE][HEDGE] event=skip bucket=%s reason=no_opp_ask opp_token=%s", cb["ts"], opp_token[:8])
+                        LOG.info("[TRADE][HEDGE] event=skip bucket=%s reason=no_opp_ask opp_token=%s ws_status=%s", cb["ts"], opp_token[:8], poly_book_ws.get_status(opp_token))
                         continue
 
                     move_flip_ready = (
@@ -394,7 +394,7 @@ def main() -> int:
                         "[TRADE][HEDGE] event=check bucket=%s from=%s to=%s opp_ask=%.4f ask_ready=%s(>=%.2f) move=%+.2f move_ready=%s(>=%.1f) secs_left=%d",
                         current_bucket, pos_dir, opp_dir, opp_ask, ask_ready, HEDGE_OPPOSITE_ASK_THRESHOLD, cb["move"], move_flip_ready, HEDGE_OPPOSITE_MOVE_THRESHOLD, secs_left,
                     )
-                    if ask_ready or move_flip_ready:
+                    if ask_ready and move_flip_ready:
                         LOG.info(
                             "[TRADE][HEDGE] event=trigger bucket=%s from=%s to=%s opp_ask=%.4f ask_ready=%s move=%+.2f move_ready=%s secs_left=%d",
                             current_bucket, pos_dir, opp_dir, opp_ask, ask_ready, cb["move"], move_flip_ready, secs_left
@@ -485,6 +485,11 @@ def main() -> int:
                         ui.add_log(f"#{entry_number} HEDGE {entry.status}: {opp_dir} sh={entry.shares:.4f} limit={entry.limit_price:.4f} cost=${entry.cost:.4f} order={entry.order_id[:10]}")
                         time.sleep(GTD_ENTRY_DELAY_SECONDS)
                         continue
+                    else:
+                        LOG.info(
+                            "[TRADE][HEDGE] event=skip bucket=%s reason=conditions_not_met opp_ask=%.4f ask_ready=%s move=%+.2f move_ready=%s secs_left=%d",
+                            current_bucket, opp_ask, ask_ready, cb["move"], move_flip_ready, secs_left,
+                        )
 
             # HEDGE2: if market flips back to original entry side, buy that side again to recover hedge loss plus 1%.
             if (cb["entries"] > 1
@@ -500,7 +505,7 @@ def main() -> int:
 
                     _, orig_ask = poly_book_ws.get_best_prices(hedge2_token)
                     if orig_ask <= 0:
-                        LOG.info("[TRADE][HEDGE2] event=skip bucket=%s reason=no_ask token=%s", cb["ts"], hedge2_token[:8])
+                        LOG.info("[TRADE][HEDGE2] event=skip bucket=%s reason=no_ask token=%s ws_status=%s", cb["ts"], hedge2_token[:8], poly_book_ws.get_status(hedge2_token))
                         continue
 
                     move_to_orig = cb["move"] if orig_dir == "UP" else -cb["move"]
@@ -637,7 +642,7 @@ def main() -> int:
 
             _, ask = poly_book_ws.get_best_prices(token)
             if ask <= 0:
-                LOG.info("[MARKET][BOOK] event=skip bucket=%s token=%s reason=no_ask", current_bucket, token[:8])
+                LOG.info("[MARKET][BOOK] event=skip bucket=%s token=%s reason=no_ask ws_status=%s", current_bucket, token[:8], poly_book_ws.get_status(token))
                 time.sleep(0.05)
                 continue
 
