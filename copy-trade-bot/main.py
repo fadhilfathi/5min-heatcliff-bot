@@ -34,7 +34,7 @@ from config import (
     HEDGE2_ASK_THRESHOLD,
     HEDGE2_MOVE_THRESHOLD,
 )
-from book import fetch_best_prices
+import poly_book_ws
 from executor import (
     auth_client,
     cancel_order,
@@ -134,6 +134,22 @@ def _get_btc_tokens() -> tuple[str, str]:
     return "", ""
 
 
+def _sync_ws_subscriptions(state: dict[str, Any], cb: dict[str, Any]) -> None:
+    token_ids: set[str] = set()
+    up = cb.get("up_token", "")
+    down = cb.get("down_token", "")
+    if up:
+        token_ids.add(up)
+    if down:
+        token_ids.add(down)
+    for pos in state["positions"].values():
+        if pos.get("status") == "OPEN":
+            for t in (pos.get("up_token", ""), pos.get("down_token", "")):
+                if t:
+                    token_ids.add(t)
+    poly_book_ws.set_subscriptions(token_ids)
+
+
 def main() -> int:
     args = parse_args()
     load_dotenv(Path(args.env_file))
@@ -176,6 +192,7 @@ def main() -> int:
 
     import threading
     threading.Thread(target=ui.start, daemon=True).start()
+    poly_book_ws.start()
 
     try:
         while not control.get("quit"):
@@ -233,6 +250,7 @@ def main() -> int:
                         now_ts,
                     )
                     ui.add_log(f"settled bucket={pos_ts} side={pos['direction']} entries={len(pos['entries'])}")
+                    _sync_ws_subscriptions(state, cb)
 
             for pos_ts in list(state["positions"].keys()):
                 pos = state["positions"][pos_ts]
@@ -332,6 +350,7 @@ def main() -> int:
                     LOG.warning("[STATE] event=bucket_open_missing_tokens bucket=%s btc_open=%.2f", current_bucket, btc_price)
                 cb["up_token"] = up_token
                 cb["down_token"] = down_token
+                _sync_ws_subscriptions(state, cb)
                 LOG.info(
                     "[STATE] event=bucket_open bucket=%s btc_open=%.2f up_token=%s down_token=%s",
                     current_bucket, btc_price, up_token[:8], down_token[:8]
@@ -361,7 +380,7 @@ def main() -> int:
                         LOG.warning("[TRADE][HEDGE] event=skip bucket=%s reason=missing_opp_token from=%s to=%s", cb["ts"], pos_dir, opp_dir)
                         continue
 
-                    _, opp_ask = fetch_best_prices(opp_token)
+                    _, opp_ask = poly_book_ws.get_best_prices(opp_token)
                     if opp_ask <= 0:
                         LOG.info("[TRADE][HEDGE] event=skip bucket=%s reason=no_opp_ask opp_token=%s", cb["ts"], opp_token[:8])
                         continue
@@ -479,7 +498,7 @@ def main() -> int:
                         LOG.warning("[TRADE][HEDGE2] event=skip bucket=%s reason=missing_token dir=%s", cb["ts"], orig_dir)
                         continue
 
-                    _, orig_ask = fetch_best_prices(hedge2_token)
+                    _, orig_ask = poly_book_ws.get_best_prices(hedge2_token)
                     if orig_ask <= 0:
                         LOG.info("[TRADE][HEDGE2] event=skip bucket=%s reason=no_ask token=%s", cb["ts"], hedge2_token[:8])
                         continue
@@ -616,7 +635,7 @@ def main() -> int:
                 time.sleep(0.05)
                 continue
 
-            _, ask = fetch_best_prices(token)
+            _, ask = poly_book_ws.get_best_prices(token)
             if ask <= 0:
                 LOG.info("[MARKET][BOOK] event=skip bucket=%s token=%s reason=no_ask", current_bucket, token[:8])
                 time.sleep(0.05)
@@ -669,6 +688,8 @@ def main() -> int:
                         "secs_left": secs_left,
                         "btc_open": cb["btc_open"],
                         "btc_now": cb["btc_now"],
+                        "up_token": cb.get("up_token", ""),
+                        "down_token": cb.get("down_token", ""),
                     }
                 state["positions"][cb_ts]["entries"].append({
                     "side": cb["direction"],
@@ -723,6 +744,8 @@ def main() -> int:
                     "secs_left": secs_left,
                     "btc_open": cb["btc_open"],
                     "btc_now": cb["btc_now"],
+                    "up_token": cb.get("up_token", ""),
+                    "down_token": cb.get("down_token", ""),
                 }
             state["positions"][cb_ts]["entries"].append({
                 "side": cb["direction"],

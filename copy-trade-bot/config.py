@@ -29,3 +29,5 @@ BINANCE_WS_URL = "wss://stream.binance.com:9443/ws/btcusdt@trade"
 COINBASE_WS_URL = "wss://ws-feed.exchange.coinbase.com"
 COINBASE_PRODUCT = "BTC-USD"
 GAMMA_EVENTS_URL = "https://gamma-api.polymarket.com/events"
+POLY_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+POLY_WS_STALE_SECONDS = 10
