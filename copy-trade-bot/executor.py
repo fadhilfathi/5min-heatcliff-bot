@@ -15,6 +15,7 @@ from py_clob_client_v2.clob_types import (
     ApiCreds,
     AssetType,
     BalanceAllowanceParams,
+    MarketOrderArgsV2,
     OrderArgsV2,
     OrderPayload,
     OrderType,
@@ -265,6 +266,92 @@ def place_gtd_limit_order(
         "[ORDER] event=accepted bucket=%s token=%s status=%s order_id=%s limit=%.4f shares=%.4f cost=%.4f",
         bucket_ts, token[:8], status, order_id[:10], entry.limit_price, entry.shares, entry.cost
     )
+    return entry, "placed"
+
+
+def place_market_sell_fok(
+    client: ClobClient,
+    bucket_ts: int,
+    token: str,
+    shares: float,
+) -> tuple[Optional[Entry], str]:
+    shares = round(max(shares, 0.0), 4)
+    if shares <= 0:
+        LOG.info("[ORDER] event=skip bucket=%s reason=no_shares token=%s side=SELL", bucket_ts, token[:8])
+        return None, "no_shares"
+    LOG.info("[ORDER] event=submit bucket=%s token=%s side=SELL type=FOK shares=%.4f", bucket_ts, token[:8], shares)
+    try:
+        order = client.create_market_order(MarketOrderArgsV2(token_id=str(token), amount=float(shares), side="SELL", order_type=OrderType.FOK))
+        res = client.post_order(order, OrderType.FOK)
+    except Exception as exc:
+        LOG.error("[ORDER] event=failed bucket=%s token=%s side=SELL type=FOK shares=%.4f error=%r", bucket_ts, token[:8], shares, exc)
+        return None, f"order_error: {exc}"
+    if not isinstance(res, dict) or not res.get("success"):
+        err = res.get("errorMsg", "") if isinstance(res, dict) else ""
+        LOG.warning("[ORDER] event=rejected bucket=%s token=%s side=SELL type=FOK shares=%.4f error=%s", bucket_ts, token[:8], shares, err)
+        return None, f"not_accepted: {err}"
+    order_id = res.get("orderID", "")
+    taking_amount = _human(res.get("takingAmount"))
+    making_amount = _human(res.get("makingAmount"))
+    filled_shares = shares if making_amount <= 0 else making_amount
+    proceeds = taking_amount if taking_amount > 0 else 0.0
+    entry = Entry(
+        coin="BTC",
+        bucket_ts=bucket_ts,
+        side="SELL",
+        token=token,
+        shares=filled_shares,
+        limit_price=0.0,
+        cost=proceeds,
+        placed_at=time.time(),
+        order_id=order_id,
+        status="FILLED" if proceeds > 0 else "RESTING",
+    )
+    LOG.info("[ORDER] event=accepted bucket=%s token=%s side=SELL type=FOK status=%s order_id=%s shares=%.4f proceeds=%.4f", bucket_ts, token[:8], entry.status, order_id[:10], entry.shares, entry.cost)
+    return entry, "placed"
+
+
+def place_limit_sell_fak(
+    client: ClobClient,
+    bucket_ts: int,
+    token: str,
+    shares: float,
+    price: float,
+) -> tuple[Optional[Entry], str]:
+    shares = round(max(shares, 0.0), 4)
+    price = round(max(price, 0.01), 4)
+    if shares <= 0:
+        LOG.info("[ORDER] event=skip bucket=%s reason=no_shares token=%s side=SELL", bucket_ts, token[:8])
+        return None, "no_shares"
+    LOG.info("[ORDER] event=submit bucket=%s token=%s side=SELL type=FAK limit=%.4f shares=%.4f", bucket_ts, token[:8], price, shares)
+    try:
+        order = client.create_order(OrderArgsV2(token_id=str(token), price=float(price), size=float(shares), side="SELL"), OrderType.FAK)
+        res = client.post_order(order, OrderType.FAK)
+    except Exception as exc:
+        LOG.error("[ORDER] event=failed bucket=%s token=%s side=SELL type=FAK limit=%.4f shares=%.4f error=%r", bucket_ts, token[:8], price, shares, exc)
+        return None, f"order_error: {exc}"
+    if not isinstance(res, dict) or not res.get("success"):
+        err = res.get("errorMsg", "") if isinstance(res, dict) else ""
+        LOG.warning("[ORDER] event=rejected bucket=%s token=%s side=SELL type=FAK limit=%.4f shares=%.4f error=%s", bucket_ts, token[:8], price, shares, err)
+        return None, f"not_accepted: {err}"
+    order_id = res.get("orderID", "")
+    taking_amount = _human(res.get("takingAmount"))
+    making_amount = _human(res.get("makingAmount"))
+    filled_shares = shares if making_amount <= 0 else making_amount
+    proceeds = taking_amount if taking_amount > 0 else round(filled_shares * price, 6)
+    entry = Entry(
+        coin="BTC",
+        bucket_ts=bucket_ts,
+        side="SELL",
+        token=token,
+        shares=filled_shares,
+        limit_price=price,
+        cost=proceeds,
+        placed_at=time.time(),
+        order_id=order_id,
+        status="FILLED" if proceeds > 0 else "RESTING",
+    )
+    LOG.info("[ORDER] event=accepted bucket=%s token=%s side=SELL type=FAK status=%s order_id=%s limit=%.4f shares=%.4f proceeds=%.4f", bucket_ts, token[:8], entry.status, order_id[:10], entry.limit_price, entry.shares, entry.cost)
     return entry, "placed"
 
 

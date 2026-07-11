@@ -21,12 +21,18 @@ from dotenv import load_dotenv
 
 from config import (
     BTC_MOVE_THRESHOLD,
+    FORCE_EXIT_MIN_PROFIT_PCT,
+    FORCE_EXIT_SECONDS,
+    INITIAL_ENTRY_MAX_ASK,
+    INITIAL_ENTRY_MAX_SECS_LEFT,
+    INITIAL_ENTRY_MIN_SECS_LEFT,
     LOG_DIR,
     MAX_CONCURRENT_BUCKETS,
     MAX_ENTRIES_PER_BUCKET,
     MAX_SESSION_LOSS_USD,
     MIN_SECONDS_LEFT,
     STAKE_USD_PER_ENTRY,
+    TAKE_PROFIT_PCT,
     GTD_ENTRY_DELAY_SECONDS,
     FLIP_MOVE_THRESHOLD,
     HEDGE_OPPOSITE_ASK_THRESHOLD,
@@ -49,12 +55,112 @@ from executor import (
     get_fee_per_share,
     get_net_profit_per_share,
     estimate_fee_inclusive_buy_cost,
+    place_limit_sell_fak,
+    place_market_sell_fok,
 )
 from models import Entry
 from price_feed import get_btc_price
 from tui import CopyTradeUI
 
 LOG = logging.getLogger("copy_trade")
+
+
+def _refresh_open_entry(client, entry: dict[str, Any]) -> None:
+    order_id = str(entry.get("order_id") or "")
+    if not order_id:
+        return
+    order_data = get_order_status(client, order_id)
+    if not isinstance(order_data, dict):
+        return
+    status_text = str(order_data.get("status") or "").lower()
+    matched = float(order_data.get("size_matched") or 0.0)
+    original_size = float(order_data.get("original_size") or entry.get("shares") or 0.0)
+    if matched > 0 or status_text in {"matched", "filled"}:
+        entry["status"] = "FILLED"
+        if matched > 0:
+            entry["shares"] = matched
+    elif status_text in {"canceled", "cancelled"}:
+        entry["status"] = "CANCELLED"
+    elif status_text in {"expired", "unmatched"}:
+        entry["status"] = "EXPIRED"
+    elif status_text == "live":
+        entry["status"] = "RESTING"
+    if entry.get("status") == "FILLED" and original_size > 0 and matched <= 0:
+        entry["shares"] = original_size
+    if entry.get("status") == "FILLED" and entry.get("token") and entry.get("limit_price"):
+        raw_filled_cost = float(entry.get("shares", 0)) * float(entry.get("limit_price", 0))
+        entry["cost"] = estimate_fee_inclusive_buy_cost(
+            client,
+            str(entry["token"]),
+            float(entry["limit_price"]),
+            float(entry.get("shares", 0)),
+            raw_filled_cost,
+        )
+
+
+def _simple_open_position_token(pos: dict[str, Any]) -> str:
+    direction = pos.get("direction", "")
+    if direction == "UP":
+        return str(pos.get("up_token") or "")
+    if direction == "DOWN":
+        return str(pos.get("down_token") or "")
+    return ""
+
+
+def _is_simple_open_position(pos: dict[str, Any]) -> bool:
+    if pos.get("status") != "OPEN":
+        return False
+    entries = pos.get("entries", [])
+    return len(entries) == 1
+
+
+def _estimate_exit_profit(client, token: str, shares: float, total_cost: float) -> tuple[float | None, float | None, float, float]:
+    bid, _ = poly_book_ws.get_best_prices(token)
+    if bid <= 0 or shares <= 0 or total_cost <= 0:
+        return None, None, bid, 0.0
+    gross_value = shares * bid
+    fee = shares * get_fee_per_share(client, token, bid) if client else 0.0
+    net_value = max(gross_value - fee, 0.0)
+    profit = net_value - total_cost
+    profit_pct = profit / total_cost if total_cost > 0 else 0.0
+    return profit, profit_pct, bid, net_value
+
+
+def _close_simple_position(client, pos_ts: int, pos: dict[str, Any], reason: str, bid: float, ui: CopyTradeUI) -> bool:
+    token = _simple_open_position_token(pos)
+    if not token:
+        return False
+    entry = pos.get("entries", [{}])[0]
+    shares = float(entry.get("shares") or 0.0)
+    if shares <= 0:
+        return False
+    tick_size = get_tick_size(client, token)
+    close_entry, outcome = place_market_sell_fok(client, pos_ts, token, shares)
+    method = "fok_market_sell"
+    if close_entry is None:
+        close_entry, outcome = place_limit_sell_fak(client, pos_ts, token, shares, bid)
+        method = "fak_limit_sell"
+    if close_entry is None:
+        LOG.error("[TRADE][EXIT] event=failed bucket=%s reason=%s token=%s bid=%.4f shares=%.4f outcome=%s", pos_ts, reason, token[:8], bid, shares, outcome)
+        ui.add_log(f"exit failed: {reason} {outcome}")
+        return False
+    buy_cost = float(entry.get("cost") or pos.get("total_cost") or 0.0)
+    proceeds = float(close_entry.cost or 0.0)
+    pnl = round(proceeds - buy_cost, 4)
+    pos["status"] = "CLOSED"
+    pos["closed_at"] = int(time.time())
+    pos["close_reason"] = reason
+    pos["close_method"] = method
+    pos["exit_price"] = bid
+    pos["exit_shares"] = close_entry.shares
+    pos["exit_order_id"] = close_entry.order_id
+    pos["pnl"] = pnl
+    bal_after = get_balance(client)
+    if bal_after is not None:
+        pos["balance_after"] = bal_after
+    LOG.info("[TRADE][EXIT] event=closed bucket=%s reason=%s method=%s bid=%.4f shares=%.4f proceeds=%.4f pnl=%+.4f order_id=%s", pos_ts, reason, method, bid, close_entry.shares, proceeds, pnl, close_entry.order_id[:10])
+    ui.add_log(f"exit {reason}: bid={bid:.4f} sh={close_entry.shares:.4f} pnl=${pnl:+.4f}")
+    return True
 
 
 def parse_args() -> argparse.Namespace:
@@ -250,6 +356,36 @@ def main() -> int:
                         now_ts,
                     )
                     ui.add_log(f"settled bucket={pos_ts} side={pos['direction']} entries={len(pos['entries'])}")
+                    _sync_ws_subscriptions(state, cb)
+
+            if args.live and client is not None:
+                closed_any = False
+                for pos_ts in list(state["positions"].keys()):
+                    pos = state["positions"][pos_ts]
+                    if not _is_simple_open_position(pos):
+                        continue
+                    entry = pos.get("entries", [{}])[0]
+                    _refresh_open_entry(client, entry)
+                    if entry.get("status") != "FILLED":
+                        continue
+                    pos["total_cost"] = float(entry.get("cost") or pos.get("total_cost") or 0.0)
+                    shares = float(entry.get("shares") or 0.0)
+                    total_cost = float(entry.get("cost") or pos.get("total_cost") or 0.0)
+                    token = _simple_open_position_token(pos)
+                    profit, profit_pct, bid, _ = _estimate_exit_profit(client, token, shares, total_cost)
+                    if profit is None or profit_pct is None:
+                        continue
+                    pos_secs_left = _seconds_left(pos_ts)
+                    if profit_pct >= TAKE_PROFIT_PCT:
+                        LOG.info("[TRADE][EXIT] event=trigger bucket=%s reason=take_profit bid=%.4f profit=%+.4f profit_pct=%.4f secs_left=%d", pos_ts, bid, profit, profit_pct, pos_secs_left)
+                        if _close_simple_position(client, pos_ts, pos, "take_profit", bid, ui):
+                            closed_any = True
+                            continue
+                    if pos_secs_left <= FORCE_EXIT_SECONDS and profit_pct > FORCE_EXIT_MIN_PROFIT_PCT:
+                        LOG.info("[TRADE][EXIT] event=trigger bucket=%s reason=force_profit_exit bid=%.4f profit=%+.4f profit_pct=%.4f secs_left=%d", pos_ts, bid, profit, profit_pct, pos_secs_left)
+                        if _close_simple_position(client, pos_ts, pos, "force_profit_exit", bid, ui):
+                            closed_any = True
+                if closed_any:
                     _sync_ws_subscriptions(state, cb)
 
             for pos_ts in list(state["positions"].keys()):
@@ -628,6 +764,16 @@ def main() -> int:
                 time.sleep(0.05)
                 continue
 
+            if cb["entries"] == 0 and secs_left > INITIAL_ENTRY_MAX_SECS_LEFT:
+                LOG.info("[RISK] event=skip bucket=%s reason=too_early_initial secs_left=%d max_secs_left=%d", current_bucket, secs_left, INITIAL_ENTRY_MAX_SECS_LEFT)
+                time.sleep(0.05)
+                continue
+
+            if cb["entries"] == 0 and secs_left <= INITIAL_ENTRY_MIN_SECS_LEFT:
+                LOG.info("[RISK] event=skip bucket=%s reason=too_late_initial secs_left=%d min_secs_left=%d", current_bucket, secs_left, INITIAL_ENTRY_MIN_SECS_LEFT)
+                time.sleep(0.05)
+                continue
+
             active_buckets = sum(1 for ts, p in state["positions"].items() if p.get("status") == "OPEN")
             if active_buckets >= MAX_CONCURRENT_BUCKETS:
                 LOG.info("[RISK] event=skip bucket=%s reason=max_concurrent active_buckets=%d max_buckets=%d", current_bucket, active_buckets, MAX_CONCURRENT_BUCKETS)
@@ -643,6 +789,11 @@ def main() -> int:
             _, ask = poly_book_ws.get_best_prices(token)
             if ask <= 0:
                 LOG.info("[MARKET][BOOK] event=skip bucket=%s token=%s reason=no_ask ws_status=%s", current_bucket, token[:8], poly_book_ws.get_status(token))
+                time.sleep(0.05)
+                continue
+
+            if cb["entries"] == 0 and ask >= INITIAL_ENTRY_MAX_ASK:
+                LOG.info("[RISK] event=skip bucket=%s reason=ask_too_high token=%s ask=%.4f max_ask=%.4f", current_bucket, token[:8], ask, INITIAL_ENTRY_MAX_ASK)
                 time.sleep(0.05)
                 continue
 
