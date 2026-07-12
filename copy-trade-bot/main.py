@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""copy-trade-bot/main.py — Autonomous BTC 5m directional momentum bot.
-Places GTD limit orders below ask when BTC moves $30+ since bucket open.
-Scales in (up to 3 entries per bucket) if BTC keeps moving same direction.
+"""copy-trade-bot/main.py — Autonomous ETH 5m directional momentum bot.
+Places GTD limit orders below ask when ETH moves since bucket open.
+Scales in (up to 3 entries per bucket) if ETH keeps moving same direction.
 Rides all positions to settlement. No sells."""
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ sys.path.insert(0, str(BOT_DIR))
 from dotenv import load_dotenv
 
 from config import (
-    BTC_MOVE_THRESHOLD,
+    ETH_MOVE_THRESHOLD,
     FORCE_EXIT_MIN_PROFIT_PCT,
     FORCE_EXIT_SECONDS,
     INITIAL_ENTRY_MAX_ASK,
@@ -57,9 +57,10 @@ from executor import (
     estimate_fee_inclusive_buy_cost,
     place_limit_sell_fak,
     place_market_sell_fok,
+    place_market_buy_fok,
 )
 from models import Entry
-from price_feed import get_btc_price
+from price_feed import get_eth_price
 from tui import CopyTradeUI
 
 LOG = logging.getLogger("copy_trade")
@@ -126,6 +127,9 @@ def _estimate_exit_profit(client, token: str, shares: float, total_cost: float) 
     return profit, profit_pct, bid, net_value
 
 
+_last_exit_error_ts: dict[int, float] = {}
+
+
 def _close_simple_position(client, pos_ts: int, pos: dict[str, Any], reason: str, bid: float, ui: CopyTradeUI) -> bool:
     token = _simple_open_position_token(pos)
     if not token:
@@ -135,14 +139,18 @@ def _close_simple_position(client, pos_ts: int, pos: dict[str, Any], reason: str
     if shares <= 0:
         return False
     tick_size = get_tick_size(client, token)
+    sell_bid = min(bid, 0.99)
     close_entry, outcome = place_market_sell_fok(client, pos_ts, token, shares)
     method = "fok_market_sell"
     if close_entry is None:
-        close_entry, outcome = place_limit_sell_fak(client, pos_ts, token, shares, bid)
+        close_entry, outcome = place_limit_sell_fak(client, pos_ts, token, shares, sell_bid)
         method = "fak_limit_sell"
     if close_entry is None:
-        LOG.error("[TRADE][EXIT] event=failed bucket=%s reason=%s token=%s bid=%.4f shares=%.4f outcome=%s", pos_ts, reason, token[:8], bid, shares, outcome)
-        ui.add_log(f"exit failed: {reason} {outcome}")
+        now = time.time()
+        if now - _last_exit_error_ts.get(pos_ts, 0) >= 5.0:
+            LOG.error("[TRADE][EXIT] event=failed bucket=%s reason=%s token=%s sell_bid=%.4f shares=%.4f outcome=%s", pos_ts, reason, token[:8], sell_bid, shares, outcome)
+            ui.add_log(f"exit failed: {reason} {outcome}")
+            _last_exit_error_ts[pos_ts] = now
         return False
     buy_cost = float(entry.get("cost") or pos.get("total_cost") or 0.0)
     proceeds = float(close_entry.cost or 0.0)
@@ -151,15 +159,15 @@ def _close_simple_position(client, pos_ts: int, pos: dict[str, Any], reason: str
     pos["closed_at"] = int(time.time())
     pos["close_reason"] = reason
     pos["close_method"] = method
-    pos["exit_price"] = bid
+    pos["exit_price"] = sell_bid
     pos["exit_shares"] = close_entry.shares
     pos["exit_order_id"] = close_entry.order_id
     pos["pnl"] = pnl
     bal_after = get_balance(client)
     if bal_after is not None:
         pos["balance_after"] = bal_after
-    LOG.info("[TRADE][EXIT] event=closed bucket=%s reason=%s method=%s bid=%.4f shares=%.4f proceeds=%.4f pnl=%+.4f order_id=%s", pos_ts, reason, method, bid, close_entry.shares, proceeds, pnl, close_entry.order_id[:10])
-    ui.add_log(f"exit {reason}: bid={bid:.4f} sh={close_entry.shares:.4f} pnl=${pnl:+.4f}")
+    LOG.info("[TRADE][EXIT] event=closed bucket=%s reason=%s method=%s sell_bid=%.4f shares=%.4f proceeds=%.4f pnl=%+.4f order_id=%s", pos_ts, reason, method, sell_bid, close_entry.shares, proceeds, pnl, close_entry.order_id[:10])
+    ui.add_log(f"exit {reason}: bid={sell_bid:.4f} sh={close_entry.shares:.4f} pnl=${pnl:+.4f}")
     return True
 
 
@@ -189,8 +197,8 @@ def _build_state() -> dict[str, Any]:
         "positions": {},
         "current_bucket": {
             "ts": 0,
-            "btc_open": 0.0,
-            "btc_now": 0.0,
+            "eth_open": 0.0,
+            "eth_now": 0.0,
             "move": 0.0,
             "direction": "",
             "entries": 0,
@@ -204,7 +212,7 @@ def _build_state() -> dict[str, Any]:
             "active_buckets": 0,
             "entry_count": 0,
             "poll_count": 0,
-            "btc_price": 0.0,
+            "eth_price": 0.0,
         },
     }
 
@@ -213,12 +221,12 @@ def _seconds_left(bucket_ts: int) -> int:
     return max(0, (bucket_ts + 300) - int(time.time()))
 
 
-def _get_btc_tokens() -> tuple[str, str]:
+def _get_eth_tokens() -> tuple[str, str]:
     import json, requests
     from config import GAMMA_EVENTS_URL
     now_ts = int(time.time())
     bucket = now_ts - (now_ts % 300)
-    slug = f"btc-updown-5m-{bucket}"
+    slug = f"eth-updown-5m-{bucket}"
     LOG.debug("[MARKET][TOKEN] event=resolve_start slug=%s", slug)
     try:
         resp = requests.get(GAMMA_EVENTS_URL, params={"slug": slug}, timeout=10)
@@ -269,7 +277,7 @@ def main() -> int:
     LOG.info(
         "[BOOT] event=config stake=%.2f move_threshold=%.2f flip_threshold=%.2f hedge_ask_threshold=%.2f hedge_move_threshold=%.2f min_seconds_left=%d max_entries=%d max_buckets=%d",
         STAKE_USD_PER_ENTRY,
-        BTC_MOVE_THRESHOLD,
+    ETH_MOVE_THRESHOLD,
         FLIP_MOVE_THRESHOLD,
         HEDGE_OPPOSITE_ASK_THRESHOLD,
         HEDGE_OPPOSITE_MOVE_THRESHOLD,
@@ -277,8 +285,8 @@ def main() -> int:
         MAX_ENTRIES_PER_BUCKET,
         MAX_CONCURRENT_BUCKETS,
     )
-    ui.add_log("starting BTC directional momentum bot")
-    ui.add_log(f"mode={mode} stake=${STAKE_USD_PER_ENTRY} threshold=${BTC_MOVE_THRESHOLD} max_entries={MAX_ENTRIES_PER_BUCKET}")
+    ui.add_log("starting ETH directional momentum bot")
+    ui.add_log(f"mode={mode} stake=${STAKE_USD_PER_ENTRY} threshold=${ETH_MOVE_THRESHOLD} max_entries={MAX_ENTRIES_PER_BUCKET}")
 
     client = None
     start_balance = None
@@ -465,36 +473,37 @@ def main() -> int:
                         ui.add_log(f"monitor bucket={pos_ts}: resolution pending, filled={filled_entries}/{total_entries}")
                         pos["last_pending_log_at"] = now_ts
 
-            btc_price = get_btc_price()
-            if btc_price is None:
+            eth_price = get_eth_price()
+            if eth_price is None:
                 LOG.debug("[MARKET][PRICE] event=skip_loop reason=price_unavailable")
                 time.sleep(0.05)
                 continue
-            state["_meta"]["btc_price"] = btc_price
+            state["_meta"]["eth_price"] = eth_price
 
             if cb["ts"] != current_bucket:
                 cb["ts"] = current_bucket
-                cb["btc_open"] = btc_price
-                cb["btc_now"] = btc_price
+                cb["eth_open"] = eth_price
+                cb["eth_now"] = eth_price
                 cb["move"] = 0.0
                 cb["direction"] = ""
                 cb["entries"] = 0
                 cb["best_abs_move"] = 0.0
                 cb["hedge_count"] = 0
-                up_token, down_token = _get_btc_tokens()
+                cb["last_logged_dir"] = ""
+                up_token, down_token = _get_eth_tokens()
                 if not up_token or not down_token:
-                    LOG.warning("[STATE] event=bucket_open_missing_tokens bucket=%s btc_open=%.2f", current_bucket, btc_price)
+                    LOG.warning("[STATE] event=bucket_open_missing_tokens bucket=%s eth_open=%.2f", current_bucket, eth_price)
                 cb["up_token"] = up_token
                 cb["down_token"] = down_token
                 _sync_ws_subscriptions(state, cb)
                 LOG.info(
-                    "[STATE] event=bucket_open bucket=%s btc_open=%.2f up_token=%s down_token=%s",
-                    current_bucket, btc_price, up_token[:8], down_token[:8]
+                    "[STATE] event=bucket_open bucket=%s eth_open=%.2f up_token=%s down_token=%s",
+                    current_bucket, eth_price, up_token[:8], down_token[:8]
                 )
-                ui.add_log(f"new bucket {current_bucket} BTC=${btc_price:.2f}")
+                ui.add_log(f"new bucket {current_bucket} ETH=${eth_price:.2f}")
 
-            cb["btc_now"] = btc_price
-            cb["move"] = btc_price - cb["btc_open"]
+            cb["eth_now"] = eth_price
+            cb["move"] = eth_price - cb["eth_open"]
             move_abs = abs(cb["move"])
 
             secs_left = _seconds_left(current_bucket)
@@ -504,9 +513,10 @@ def main() -> int:
                 time.sleep(0.05)
                 continue
 
-            # HEDGE: if opposite ask is rich or BTC has flipped far enough, buy opposite to recover.
+            # HEDGE: if opposite ask is rich or ETH has flipped far enough, buy opposite to recover.
             if (cb["entries"] > 0
                     and cb["ts"] in state["positions"]
+                    and state["positions"][cb["ts"]].get("status") == "OPEN"
                     and cb.get("hedge_count", 0) == 0):
                 pos_dir = state["positions"][cb["ts"]].get("direction", "")
                 if pos_dir:
@@ -518,7 +528,7 @@ def main() -> int:
 
                     _, opp_ask = poly_book_ws.get_best_prices(opp_token)
                     if opp_ask <= 0:
-                        LOG.info("[TRADE][HEDGE] event=skip bucket=%s reason=no_opp_ask opp_token=%s ws_status=%s", cb["ts"], opp_token[:8], poly_book_ws.get_status(opp_token))
+                        LOG.debug("[TRADE][HEDGE] event=skip bucket=%s reason=no_opp_ask opp_token=%s ws_status=%s", cb["ts"], opp_token[:8], poly_book_ws.get_status(opp_token))
                         continue
 
                     move_flip_ready = (
@@ -557,7 +567,7 @@ def main() -> int:
                             "[TRADE][HEDGE] event=sizing bucket=%s dir=%s first_cost=%.4f limit=%.4f npps=%.6f required_shares=%.4f required_cost=%.4f",
                             current_bucket, opp_dir, first_trade_cost, hedge_limit_price, net_profit_per_share, hedge_shares, hedge_cost,
                         )
-                        ui.add_log(f"#{entry_number} HEDGE {opp_dir}: opp_ask={opp_ask:.4f} BTC_move=${cb['move']:+.2f} secs_left={secs_left}")
+                        ui.add_log(f"#{entry_number} HEDGE {opp_dir}: opp_ask={opp_ask:.4f} ETH_move=${cb['move']:+.2f} secs_left={secs_left}")
                         if not args.live:
                             LOG.info(
                                 "[TRADE][HEDGE] event=dry_run bucket=%s dir=%s entry=%d ask=%.4f limit=%.4f shares=%.4f cost=%.4f",
@@ -630,6 +640,7 @@ def main() -> int:
             # HEDGE2: if market flips back to original entry side, buy that side again to recover hedge loss plus 1%.
             if (cb["entries"] > 1
                     and cb["ts"] in state["positions"]
+                    and state["positions"][cb["ts"]].get("status") == "OPEN"
                     and cb.get("hedge_count", 0) == 1):
                 pos = state["positions"][cb["ts"]]
                 orig_dir = pos.get("direction", "")
@@ -641,7 +652,7 @@ def main() -> int:
 
                     _, orig_ask = poly_book_ws.get_best_prices(hedge2_token)
                     if orig_ask <= 0:
-                        LOG.info("[TRADE][HEDGE2] event=skip bucket=%s reason=no_ask token=%s ws_status=%s", cb["ts"], hedge2_token[:8], poly_book_ws.get_status(hedge2_token))
+                        LOG.debug("[TRADE][HEDGE2] event=skip bucket=%s reason=no_ask token=%s ws_status=%s", cb["ts"], hedge2_token[:8], poly_book_ws.get_status(hedge2_token))
                         continue
 
                     move_to_orig = cb["move"] if orig_dir == "UP" else -cb["move"]
@@ -679,7 +690,7 @@ def main() -> int:
                             "[TRADE][HEDGE2] event=sizing bucket=%s dir=%s first_cost=%.4f hedge1_cost=%.4f first_shares=%.4f limit=%.4f npps=%.6f target_recovery=%.4f required_shares=%.4f required_cost=%.4f",
                             current_bucket, orig_dir, first_trade_cost, first_hedge_cost, first_trade_shares, hedge2_limit_price, net_profit_per_share2, target_recovery, hedge2_shares, hedge2_cost,
                         )
-                        ui.add_log(f"#{entry_number} HEDGE2 {orig_dir}: ask={orig_ask:.4f} BTC_move=${cb['move']:+.2f} secs_left={secs_left}")
+                        ui.add_log(f"#{entry_number} HEDGE2 {orig_dir}: ask={orig_ask:.4f} ETH_move=${cb['move']:+.2f} secs_left={secs_left}")
 
                         if not args.live:
                             LOG.info(
@@ -750,33 +761,35 @@ def main() -> int:
                         time.sleep(GTD_ENTRY_DELAY_SECONDS)
                         continue
 
-            if move_abs < BTC_MOVE_THRESHOLD:
-                LOG.debug("[SIGNAL] event=below_threshold bucket=%s move=%+.2f move_abs=%.2f threshold=%.2f", current_bucket, cb["move"], move_abs, BTC_MOVE_THRESHOLD)
+            if move_abs < ETH_MOVE_THRESHOLD:
+                LOG.debug("[SIGNAL] event=below_threshold bucket=%s move=%+.2f move_abs=%.2f threshold=%.2f", current_bucket, cb["move"], move_abs, ETH_MOVE_THRESHOLD)
                 time.sleep(0.05)
                 continue
 
             cb["direction"] = "UP" if cb["move"] > 0 else "DOWN"
-            LOG.info("[SIGNAL] event=threshold_cross bucket=%s move=%+.2f move_abs=%.2f threshold=%.2f dir=%s", current_bucket, cb["move"], move_abs, BTC_MOVE_THRESHOLD, cb["direction"])
-            ui.add_log(f"BTC moved ${cb['move']:+.2f} → direction {cb['direction']}")
+            if cb["direction"] != cb.get("last_logged_dir"):
+                LOG.info("[SIGNAL] event=threshold_cross bucket=%s move=%+.2f move_abs=%.2f threshold=%.2f dir=%s", current_bucket, cb["move"], move_abs, ETH_MOVE_THRESHOLD, cb["direction"])
+                ui.add_log(f"ETH moved ${cb['move']:+.2f} → direction {cb['direction']}")
+                cb["last_logged_dir"] = cb["direction"]
 
             if cb["entries"] >= MAX_ENTRIES_PER_BUCKET:
-                LOG.info("[RISK] event=skip bucket=%s reason=max_entries entries=%d max_entries=%d", current_bucket, cb["entries"], MAX_ENTRIES_PER_BUCKET)
+                LOG.debug("[RISK] event=skip bucket=%s reason=max_entries entries=%d max_entries=%d", current_bucket, cb["entries"], MAX_ENTRIES_PER_BUCKET)
                 time.sleep(0.05)
                 continue
 
             if cb["entries"] == 0 and secs_left > INITIAL_ENTRY_MAX_SECS_LEFT:
-                LOG.info("[RISK] event=skip bucket=%s reason=too_early_initial secs_left=%d max_secs_left=%d", current_bucket, secs_left, INITIAL_ENTRY_MAX_SECS_LEFT)
+                LOG.debug("[RISK] event=skip bucket=%s reason=too_early_initial secs_left=%d max_secs_left=%d", current_bucket, secs_left, INITIAL_ENTRY_MAX_SECS_LEFT)
                 time.sleep(0.05)
                 continue
 
             if cb["entries"] == 0 and secs_left <= INITIAL_ENTRY_MIN_SECS_LEFT:
-                LOG.info("[RISK] event=skip bucket=%s reason=too_late_initial secs_left=%d min_secs_left=%d", current_bucket, secs_left, INITIAL_ENTRY_MIN_SECS_LEFT)
+                LOG.debug("[RISK] event=skip bucket=%s reason=too_late_initial secs_left=%d min_secs_left=%d", current_bucket, secs_left, INITIAL_ENTRY_MIN_SECS_LEFT)
                 time.sleep(0.05)
                 continue
 
             active_buckets = sum(1 for ts, p in state["positions"].items() if p.get("status") == "OPEN")
             if active_buckets >= MAX_CONCURRENT_BUCKETS:
-                LOG.info("[RISK] event=skip bucket=%s reason=max_concurrent active_buckets=%d max_buckets=%d", current_bucket, active_buckets, MAX_CONCURRENT_BUCKETS)
+                LOG.debug("[RISK] event=skip bucket=%s reason=max_concurrent active_buckets=%d max_buckets=%d", current_bucket, active_buckets, MAX_CONCURRENT_BUCKETS)
                 time.sleep(0.05)
                 continue
 
@@ -788,12 +801,12 @@ def main() -> int:
 
             _, ask = poly_book_ws.get_best_prices(token)
             if ask <= 0:
-                LOG.info("[MARKET][BOOK] event=skip bucket=%s token=%s reason=no_ask ws_status=%s", current_bucket, token[:8], poly_book_ws.get_status(token))
+                LOG.debug("[MARKET][BOOK] event=skip bucket=%s token=%s reason=no_ask ws_status=%s", current_bucket, token[:8], poly_book_ws.get_status(token))
                 time.sleep(0.05)
                 continue
 
             if cb["entries"] == 0 and ask >= INITIAL_ENTRY_MAX_ASK:
-                LOG.info("[RISK] event=skip bucket=%s reason=ask_too_high token=%s ask=%.4f max_ask=%.4f", current_bucket, token[:8], ask, INITIAL_ENTRY_MAX_ASK)
+                LOG.debug("[RISK] event=skip bucket=%s reason=ask_too_high token=%s ask=%.4f max_ask=%.4f", current_bucket, token[:8], ask, INITIAL_ENTRY_MAX_ASK)
                 time.sleep(0.05)
                 continue
 
@@ -805,23 +818,23 @@ def main() -> int:
                      is_flip = True
                      LOG.info("[SIGNAL] event=flip_detected bucket=%s prev_dir=%s dir=%s move=%+.2f", current_bucket, pos_dir, cb["direction"], cb["move"])
 
-            threshold = FLIP_MOVE_THRESHOLD if is_flip else BTC_MOVE_THRESHOLD
+            threshold = FLIP_MOVE_THRESHOLD if is_flip else ETH_MOVE_THRESHOLD
             
             if cb["entries"] > 0 and not is_flip and move_abs <= cb.get("best_abs_move", 0.0):
-                LOG.info("[SIGNAL] event=skip bucket=%s reason=not_extending move=%+.2f move_abs=%.2f best_abs_move=%.2f", current_bucket, cb["move"], move_abs, cb.get('best_abs_move', 0.0))
-                ui.add_log(f"skip #{cb['entries']+1}: move ${cb['move']:+.2f} not extending best ${cb.get('best_abs_move', 0.0):+.2f}")
+                LOG.debug("[SIGNAL] event=skip bucket=%s reason=not_extending move=%+.2f move_abs=%.2f best_abs_move=%.2f", current_bucket, cb["move"], move_abs, cb.get('best_abs_move', 0.0))
+                # ui.add_log suppressed for not_extending (too noisy)
                 time.sleep(0.05)
                 continue
             
             if is_flip and move_abs < threshold:
-                LOG.info("[SIGNAL] event=skip bucket=%s reason=flip_below_threshold move=%+.2f move_abs=%.2f threshold=%.2f", current_bucket, cb["move"], move_abs, threshold)
-                ui.add_log(f"skip flip #{cb['entries']+1}: move ${cb['move']:+.2f} < threshold ${threshold}")
+                LOG.debug("[SIGNAL] event=skip bucket=%s reason=flip_below_threshold move=%+.2f move_abs=%.2f threshold=%.2f", current_bucket, cb["move"], move_abs, threshold)
+                # ui.add_log suppressed for flip_below_threshold (too noisy)
                 time.sleep(0.05)
                 continue
 
             entry_number = cb["entries"] + 1
             ui.add_log(
-                f"#{entry_number} {cb['direction']} entry: BTC_move=${cb['move']:+.2f} "
+                f"#{entry_number} {cb['direction']} entry: ETH_move=${cb['move']:+.2f} "
                 f"ask={ask:.4f} secs_left={secs_left}"
             )
 
@@ -842,8 +855,8 @@ def main() -> int:
                         "total_shares": 0.0,
                         "status": "OPEN",
                         "secs_left": secs_left,
-                        "btc_open": cb["btc_open"],
-                        "btc_now": cb["btc_now"],
+                        "eth_open": cb["eth_open"],
+                        "eth_now": cb["eth_now"],
                         "up_token": cb.get("up_token", ""),
                         "down_token": cb.get("down_token", ""),
                     }
@@ -876,6 +889,11 @@ def main() -> int:
             entry, outcome = place_gtd_limit_order(
                 client, current_bucket, token, ask, tick_size
             )
+            if entry is None and "invalid amount for a marketable BUY order" in outcome and "min size: $1" in outcome:
+                retry_amount_usd = max(STAKE_USD_PER_ENTRY, 1.0)
+                LOG.info("[TRADE][ENTRY] event=retry_marketable_min bucket=%s dir=%s entry=%d token=%s type=FOK amount_usd=%.4f", current_bucket, cb["direction"], entry_number, token[:8], retry_amount_usd)
+                ui.add_log(f"retry entry: FOK ${retry_amount_usd:.2f} min notional")
+                entry, outcome = place_market_buy_fok(client, current_bucket, token, retry_amount_usd)
             if entry is None:
                 LOG.error("[TRADE][ENTRY] event=failed bucket=%s dir=%s entry=%d token=%s outcome=%s", current_bucket, cb["direction"], entry_number, token[:8], outcome)
                 ui.add_log(f"order failed: {outcome}")
@@ -898,8 +916,8 @@ def main() -> int:
                     "total_shares": 0.0,
                     "status": "OPEN",
                     "secs_left": secs_left,
-                    "btc_open": cb["btc_open"],
-                    "btc_now": cb["btc_now"],
+                    "eth_open": cb["eth_open"],
+                    "eth_now": cb["eth_now"],
                     "up_token": cb.get("up_token", ""),
                     "down_token": cb.get("down_token", ""),
                 }

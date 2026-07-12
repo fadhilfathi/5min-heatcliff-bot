@@ -16,7 +16,7 @@ LOG = logging.getLogger("poly_book_ws")
 
 _BACKOFF = [1, 2, 4, 8, 16, 32, 60]
 _PING_INTERVAL = 20
-_HEALTH_LOG_INTERVAL = 30
+_HEALTH_LOG_INTERVAL = 120
 
 
 class _BookCache:

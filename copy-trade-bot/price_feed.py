@@ -10,7 +10,7 @@ import requests
 import websockets
 from websockets.exceptions import ConnectionClosed
 
-from config import BINANCE_API, BINANCE_WS_URL, BTC_SYMBOL, COINBASE_PRODUCT, COINBASE_WS_URL
+from config import BINANCE_API, BINANCE_WS_URL, ETH_SYMBOL, COINBASE_PRODUCT, COINBASE_WS_URL
 
 LOG = logging.getLogger("price_feed")
 _PING_INTERVAL = 20
@@ -44,11 +44,11 @@ _start_lock = threading.Lock()
 _started = False
 
 
-def get_btc_price_binance() -> float | None:
+def get_eth_price_binance() -> float | None:
     try:
         resp = requests.get(
             f"{BINANCE_API}/api/v3/ticker/price",
-            params={"symbol": BTC_SYMBOL},
+            params={"symbol": ETH_SYMBOL},
             timeout=3,
         )
         resp.raise_for_status()
@@ -59,10 +59,10 @@ def get_btc_price_binance() -> float | None:
             return None
         return price
     except requests.exceptions.Timeout:
-        LOG.warning("[MARKET][PRICE] event=fetch_failed source=binance reason=timeout symbol=%s timeout_s=3", BTC_SYMBOL)
+        LOG.warning("[MARKET][PRICE] event=fetch_failed source=binance reason=timeout symbol=%s timeout_s=3", ETH_SYMBOL)
         return None
     except requests.exceptions.HTTPError as exc:
-        LOG.warning("[MARKET][PRICE] event=fetch_failed source=binance reason=http status=%s symbol=%s error=%r", exc.response.status_code if exc.response else None, BTC_SYMBOL, exc)
+        LOG.warning("[MARKET][PRICE] event=fetch_failed source=binance reason=http status=%s symbol=%s error=%r", exc.response.status_code if exc.response else None, ETH_SYMBOL, exc)
         return None
     except Exception as exc:
         LOG.warning("[MARKET][PRICE] event=fetch_failed source=binance reason=unknown error=%r", exc)
@@ -108,7 +108,7 @@ async def _binance_ws_loop() -> None:
     while True:
         try:
             async with websockets.connect(BINANCE_WS_URL, ping_interval=_PING_INTERVAL, ping_timeout=20, open_timeout=10) as ws:
-                LOG.info("[MARKET][PRICE] event=ws_connected source=binance symbol=%s", BTC_SYMBOL)
+                LOG.info("[MARKET][PRICE] event=ws_connected source=binance symbol=%s", ETH_SYMBOL)
                 backoff_idx = 0
                 while True:
                     raw = await asyncio.wait_for(ws.recv(), timeout=30)
@@ -117,11 +117,11 @@ async def _binance_ws_loop() -> None:
                     if price > 0:
                         _latest_binance_price.set(price)
         except asyncio.TimeoutError:
-            LOG.warning("[MARKET][PRICE] event=ws_reconnect source=binance reason=timeout symbol=%s", BTC_SYMBOL)
+            LOG.warning("[MARKET][PRICE] event=ws_reconnect source=binance reason=timeout symbol=%s", ETH_SYMBOL)
         except ConnectionClosed as exc:
-            LOG.warning("[MARKET][PRICE] event=ws_reconnect source=binance reason=closed symbol=%s error=%r", BTC_SYMBOL, exc)
+            LOG.warning("[MARKET][PRICE] event=ws_reconnect source=binance reason=closed symbol=%s error=%r", ETH_SYMBOL, exc)
         except Exception as exc:
-            LOG.warning("[MARKET][PRICE] event=ws_reconnect source=binance reason=unknown symbol=%s error=%r", BTC_SYMBOL, exc)
+            LOG.warning("[MARKET][PRICE] event=ws_reconnect source=binance reason=unknown symbol=%s error=%r", ETH_SYMBOL, exc)
 
         delay = _BACKOFF[min(backoff_idx, len(_BACKOFF) - 1)]
         backoff_idx += 1
@@ -152,7 +152,7 @@ def _ensure_started() -> None:
         _started = True
 
 
-def get_btc_price() -> float | None:
+def get_eth_price() -> float | None:
     _ensure_started()
     price = _latest_price.get()
     if price is None:

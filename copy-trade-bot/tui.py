@@ -73,23 +73,23 @@ class CopyTradeUI:
         hours, rem = divmod(elapsed, 3600)
         minutes, seconds = divmod(rem, 60)
         runtime = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-        btc_price = meta.get("btc_price", 0.0)
-        btc_open = cb.get("btc_open", 0.0)
+        eth_price = meta.get("eth_price", 0.0)
+        eth_open = cb.get("eth_open", 0.0)
         move = cb.get("move", 0.0)
         move_color = "green" if move > 0 else "red" if move < 0 else "white"
-        move_str = f"${move:+.2f}" if btc_open > 0 else "—"
+        move_str = f"${move:+.2f}" if eth_open > 0 else "—"
         direction = cb.get("direction", "—") or "—"
 
         layout["header"].update(
             Panel(
                 f"Mode=[cyan]{meta['mode']}[/cyan] "
-                f"BTC=[cyan]${btc_price:,.2f}[/cyan] "
+                f"ETH=[cyan]${eth_price:,.2f}[/cyan] "
                 f"Move=[{move_color}]{move_str}[/{move_color}] "
-                f"Dir=[cyan]{direction}[/cyan] "
+                f"Direction=[cyan]{direction}[/cyan] "
                 f"Best=[cyan]${cb.get('best_abs_move', 0):,.2f}[/cyan] "
-                f"Bal=[cyan]${meta.get('balance', 0):.2f}[/cyan] "
+                f"Balance=[cyan]${meta.get('balance', 0):.2f}[/cyan] "
                 f"PnL=[{pnl_color}]${pnl:+.4f}[/{pnl_color}] "
-                f"Ent=[cyan]{meta.get('entry_count', 0)}[/cyan] "
+                f"Entry=[cyan]{meta.get('entry_count', 0)}[/cyan] "
                 f"[dim]q=quit p=pause[/dim]"
             )
         )
@@ -107,38 +107,40 @@ class CopyTradeUI:
             ("Secs", 5, "right"),
         ):
             table.add_column(col, width=width, justify=justify)
-        for pos_ts in sorted(self.state["positions"].keys()):
+        for pos_ts in sorted(self.state["positions"].keys(), reverse=True):
             pos = self.state["positions"][pos_ts]
             entries = pos.get("entries", [])
             if not entries:
                 continue
             last = entries[-1]
             status_color = "bright_cyan" if pos.get("status") == "OPEN" else "dim"
+            move_val = last.get("move")
+            move_color = "green" if move_val and move_val > 0 else "red" if move_val and move_val < 0 else "dim"
+            pnl_val = pos.get("pnl")
+            pnl_color = "green" if pnl_val and pnl_val > 0 else "red" if pnl_val and pnl_val < 0 else "dim"
             table.add_row(
                 str(pos_ts),
                 pos.get("direction", ""),
                 str(len(entries)),
-                _fmt(last.get("move")),
+                f"[{move_color}]{_fmt(move_val, 4)}[/{move_color}]",
                 _fmt(last.get("limit_price")),
                 _fmt(pos.get("total_shares")),
                 _fmt(pos.get("total_cost")),
-                _fmt(pos.get("pnl")),
+                f"[{pnl_color}]{_fmt(pnl_val, 4)}[/{pnl_color}]",
                 f"[{status_color}]{pos.get('status','')}[/{status_color}]",
                 str(pos.get("secs_left", "-")),
             )
         layout["body"].update(table)
         logs = "\n".join(self.logs) if self.logs else "No events yet"
-        layout["footer"].update(Panel(logs, title=f"Recent  Runtime={runtime}  Poll={meta.get('poll_count', 0)}"))
+        layout["footer"].update(Panel(logs, title=f"Runtime=[blue]{runtime}[/blue]  Poll=[cyan]{meta.get('poll_count', 0)}[/cyan]"))
         return layout
 
 
-def _fmt(value: Any) -> str:
+def _fmt(value: Any, decimals: int = 4) -> str:
     if value is None:
         return "-"
     if isinstance(value, float):
         if value == 0.0:
             return "-"
-        if value < 0.01:
-            return f"{value:.6f}"
-        return f"{value:.4f}"
+        return f"{value:.{decimals}f}"
     return str(value)

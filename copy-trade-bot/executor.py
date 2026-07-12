@@ -200,14 +200,14 @@ def place_gtd_limit_order(
     shares: float = 1.0,
     limit_price: float | None = None,
 ) -> tuple[Optional[Entry], str]:
-    """Place GTD limit BUY below ask (not marketable → no $1 minimum)."""
+    """Place GTD limit BUY at provided price, defaulting to current ask."""
     if ask_price <= 0:
         LOG.info("[ORDER] event=skip bucket=%s reason=no_ask token=%s", bucket_ts, token[:8])
         return None, "no_ask"
 
     if limit_price is None:
-        limit_price = ask_price - max(tick_size, 0.01)
-    limit_price = round(max(limit_price, 0.01), 4)
+        limit_price = ask_price + 0.01
+    limit_price = round(min(max(limit_price, 0.01), 0.99), 4)
     shares = round(max(shares, 1.0), 4)
     cost = round(shares * limit_price, 6)
     if expiration_offset is None:
@@ -251,7 +251,7 @@ def place_gtd_limit_order(
     status = "FILLED" if taking_amount > 0 else "RESTING"
 
     entry = Entry(
-        coin="BTC",
+        coin="ETH",
         bucket_ts=bucket_ts,
         side="UP" if "up" in token.lower() else "DOWN",
         token=token,
@@ -281,7 +281,12 @@ def place_market_sell_fok(
         return None, "no_shares"
     LOG.info("[ORDER] event=submit bucket=%s token=%s side=SELL type=FOK shares=%.4f", bucket_ts, token[:8], shares)
     try:
-        order = client.create_market_order(MarketOrderArgsV2(token_id=str(token), amount=float(shares), side="SELL", order_type=OrderType.FOK))
+        from py_clob_client_v2.clob_types import PartialCreateOrderOptions
+        tick_size = get_tick_size(client, token)
+        order = client.create_market_order(
+            MarketOrderArgsV2(token_id=str(token), amount=float(shares), side="SELL", order_type=OrderType.FOK),
+            options=PartialCreateOrderOptions(tick_size=str(tick_size))
+        )
         res = client.post_order(order, OrderType.FOK)
     except Exception as exc:
         LOG.error("[ORDER] event=failed bucket=%s token=%s side=SELL type=FOK shares=%.4f error=%r", bucket_ts, token[:8], shares, exc)
@@ -296,7 +301,7 @@ def place_market_sell_fok(
     filled_shares = shares if making_amount <= 0 else making_amount
     proceeds = taking_amount if taking_amount > 0 else 0.0
     entry = Entry(
-        coin="BTC",
+        coin="ETH",
         bucket_ts=bucket_ts,
         side="SELL",
         token=token,
@@ -311,6 +316,51 @@ def place_market_sell_fok(
     return entry, "placed"
 
 
+def place_market_buy_fok(
+    client: ClobClient,
+    bucket_ts: int,
+    token: str,
+    amount_usd: float,
+) -> tuple[Optional[Entry], str]:
+    amount_usd = round(amount_usd, 4)
+    LOG.info("[ORDER] event=submit bucket=%s token=%s side=BUY type=FOK amount_usd=%.4f", bucket_ts, token[:8], amount_usd)
+    try:
+        from py_clob_client_v2.clob_types import PartialCreateOrderOptions
+        tick_size = get_tick_size(client, token)
+        order = client.create_market_order(
+            MarketOrderArgsV2(token_id=str(token), amount=float(amount_usd), side="BUY", order_type=OrderType.FOK),
+            options=PartialCreateOrderOptions(tick_size=str(tick_size))
+        )
+        res = client.post_order(order, OrderType.FOK)
+    except Exception as exc:
+        LOG.error("[ORDER] event=failed bucket=%s token=%s side=BUY type=FOK amount_usd=%.4f error=%r", bucket_ts, token[:8], amount_usd, exc)
+        return None, f"order_error: {exc}"
+    if not isinstance(res, dict) or not res.get("success"):
+        err = res.get("errorMsg", "") if isinstance(res, dict) else ""
+        LOG.warning("[ORDER] event=rejected bucket=%s token=%s side=BUY type=FOK amount_usd=%.4f error=%s", bucket_ts, token[:8], amount_usd, err)
+        return None, f"not_accepted: {err}"
+    order_id = res.get("orderID", "")
+    taking_amount = _human(res.get("takingAmount"))
+    making_amount = _human(res.get("makingAmount"))
+    filled_shares = taking_amount if taking_amount > 0 else 0.0
+    filled_cost = making_amount if making_amount > 0 else amount_usd
+    avg_price = round(filled_cost / filled_shares, 4) if filled_shares > 0 else 0.0
+    entry = Entry(
+        coin="ETH",
+        bucket_ts=bucket_ts,
+        side="UP" if "up" in token.lower() else "DOWN",
+        token=token,
+        shares=filled_shares,
+        limit_price=avg_price,
+        cost=filled_cost,
+        placed_at=time.time(),
+        order_id=order_id,
+        status="FILLED" if filled_shares > 0 else "RESTING",
+    )
+    LOG.info("[ORDER] event=accepted bucket=%s token=%s side=BUY type=FOK status=%s order_id=%s shares=%.4f cost=%.4f avg_price=%.4f", bucket_ts, token[:8], entry.status, order_id[:10], entry.shares, entry.cost, entry.limit_price)
+    return entry, "placed"
+
+
 def place_limit_sell_fak(
     client: ClobClient,
     bucket_ts: int,
@@ -319,13 +369,18 @@ def place_limit_sell_fak(
     price: float,
 ) -> tuple[Optional[Entry], str]:
     shares = round(max(shares, 0.0), 4)
-    price = round(max(price, 0.01), 4)
+    price = round(min(max(price, 0.01), 0.99), 4)
     if shares <= 0:
         LOG.info("[ORDER] event=skip bucket=%s reason=no_shares token=%s side=SELL", bucket_ts, token[:8])
         return None, "no_shares"
     LOG.info("[ORDER] event=submit bucket=%s token=%s side=SELL type=FAK limit=%.4f shares=%.4f", bucket_ts, token[:8], price, shares)
     try:
-        order = client.create_order(OrderArgsV2(token_id=str(token), price=float(price), size=float(shares), side="SELL"), OrderType.FAK)
+        from py_clob_client_v2.clob_types import PartialCreateOrderOptions
+        tick_size = get_tick_size(client, token)
+        order = client.create_order(
+            OrderArgsV2(token_id=str(token), price=float(price), size=float(shares), side="SELL"), 
+            options=PartialCreateOrderOptions(tick_size=str(tick_size))
+        )
         res = client.post_order(order, OrderType.FAK)
     except Exception as exc:
         LOG.error("[ORDER] event=failed bucket=%s token=%s side=SELL type=FAK limit=%.4f shares=%.4f error=%r", bucket_ts, token[:8], price, shares, exc)
@@ -340,7 +395,7 @@ def place_limit_sell_fak(
     filled_shares = shares if making_amount <= 0 else making_amount
     proceeds = taking_amount if taking_amount > 0 else round(filled_shares * price, 6)
     entry = Entry(
-        coin="BTC",
+        coin="ETH",
         bucket_ts=bucket_ts,
         side="SELL",
         token=token,
@@ -424,7 +479,7 @@ def get_order_status(client: ClobClient, order_id: str) -> Optional[dict]:
 
 
 def get_market_resolution(bucket_ts: int) -> Optional[str]:
-    slug = f"btc-updown-5m-{bucket_ts}"
+    slug = f"eth-updown-5m-{bucket_ts}"
     try:
         resp = requests.get(GAMMA_EVENTS_URL, params={"slug": slug}, timeout=10)
         resp.raise_for_status()
