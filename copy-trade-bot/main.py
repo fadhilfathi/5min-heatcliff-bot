@@ -232,6 +232,12 @@ def _build_state() -> dict[str, Any]:
             "entries": 0,
             "up_token": "",
             "down_token": "",
+            "hedge_order_id": "",
+            "hedge_placed_at": 0.0,
+            "hedge_fok_fallback": False,
+            "hedge2_order_id": "",
+            "hedge2_placed_at": 0.0,
+            "hedge2_fok_fallback": False,
         },
         "_meta": {
             "mode": "DRY",
@@ -290,6 +296,39 @@ def _sync_ws_subscriptions(state: dict[str, Any], cb: dict[str, Any]) -> None:
                 if t:
                     token_ids.add(t)
     poly_book_ws.set_subscriptions(token_ids)
+
+
+def _hedge_conditions_still_met(cb: dict[str, Any]) -> bool:
+    """Check if HEDGE thresholds still met (for FOK fallback)."""
+    pos_dir = cb.get("hedge_pos_dir", "")
+    if not pos_dir:
+        return False
+    opp_token = cb.get("hedge_token", "")
+    if not opp_token:
+        return False
+    _, opp_ask = poly_book_ws.get_best_prices(opp_token)
+    if opp_ask <= 0:
+        return False
+    move_flip_ready = (
+        (pos_dir == "DOWN" and cb["move"] >= HEDGE_OPPOSITE_MOVE_THRESHOLD) or
+        (pos_dir == "UP" and cb["move"] <= -HEDGE_OPPOSITE_MOVE_THRESHOLD)
+    )
+    return move_flip_ready and opp_ask >= HEDGE_OPPOSITE_ASK_THRESHOLD
+
+
+def _hedge2_conditions_still_met(cb: dict[str, Any]) -> bool:
+    """Check if HEDGE2 thresholds still met (for FOK fallback)."""
+    orig_dir = cb.get("hedge2_orig_dir", "")
+    if not orig_dir:
+        return False
+    token = cb.get("hedge2_token", "")
+    if not token:
+        return False
+    _, ask = poly_book_ws.get_best_prices(token)
+    if ask <= 0:
+        return False
+    move_to_orig = cb["move"] if orig_dir == "UP" else -cb["move"]
+    return move_to_orig >= HEDGE2_MOVE_THRESHOLD and ask >= HEDGE2_ASK_THRESHOLD
 
 
 def main() -> int:
@@ -353,6 +392,33 @@ def main() -> int:
 
             state["_meta"]["poll_count"] += 1
             now_ts = int(time.time())
+
+            if not args.live:
+                cb = state.get("current_bucket", {})
+
+            # --- HEDGE TIMEOUT CHECK ---
+            if args.live and client is not None:
+                cb = state.get("current_bucket", {})
+                if cb.get("hedge_order_id") and not cb.get("hedge_fok_fallback"):
+                    order = _bounded(lambda oid=cb["hedge_order_id"]: get_order_status(client, oid), timeout=2, default=None)
+                    if order and order.get("status") == "ORDER_STATUS_MATCHED":
+                        cb["hedge_filled"] = True
+                    elif now_ts - cb["hedge_placed_at"] >= 30 and _hedge_conditions_still_met(cb):
+                        LOG.warning("[TRADE][HEDGE] event=timeout bucket=%s order_id=%s secs_elapsed=%d", cb["ts"], cb["hedge_order_id"][:10], now_ts - cb["hedge_placed_at"])
+                        _bounded(lambda oid=cb["hedge_order_id"]: cancel_order(client, oid), timeout=2, default=False)
+                        entry, outcome = place_market_buy_fok(client, cb["ts"], cb["up_token"] if cb["direction"] == "DOWN" else cb["down_token"], cb["hedge_cost"])
+                        cb["hedge_fok_fallback"] = True
+                        cb["hedge_order_id"] = entry.order_id if outcome and entry else ""
+                if cb.get("hedge2_order_id") and not cb.get("hedge2_fok_fallback"):
+                    order = _bounded(lambda oid=cb["hedge2_order_id"]: get_order_status(client, oid), timeout=2, default=None)
+                    if order and order.get("status") == "ORDER_STATUS_MATCHED":
+                        cb["hedge2_filled"] = True
+                    elif now_ts - cb["hedge2_placed_at"] >= 11 and _hedge2_conditions_still_met(cb):
+                        LOG.warning("[TRADE][HEDGE2] event=timeout bucket=%s order_id=%s secs_elapsed=%d", cb["ts"], cb["hedge2_order_id"][:10], now_ts - cb["hedge2_placed_at"])
+                        _bounded(lambda oid=cb["hedge2_order_id"]: cancel_order(client, oid), timeout=2, default=False)
+                        entry, outcome = place_market_buy_fok(client, cb["ts"], cb["hedge2_token"], cb["hedge2_cost"])
+                        cb["hedge2_fok_fallback"] = True
+                        cb["hedge2_order_id"] = entry.order_id if outcome and entry else ""
 
             if now_ts - last_balance_check > 10 and args.live and client is not None:
                 bal = _bounded(lambda: get_balance(client), timeout=3)
@@ -591,6 +657,9 @@ def main() -> int:
                             current_bucket, pos_dir, opp_dir, opp_ask, ask_ready, cb["move"], move_flip_ready, secs_left
                         )
                         cb["direction"] = opp_dir
+                        cb["hedge_pos_dir"] = pos_dir
+                        cb["hedge_token"] = opp_token
+                        cb["hedge_cost"] = hedge_cost
                         entry_number = cb["entries"] + 1
                         if secs_left >= 60:
                             hedge_limit_price = opp_ask - 0.01
@@ -652,6 +721,11 @@ def main() -> int:
                             entry, outcome = place_market_buy_fok(client, current_bucket, opp_token, hedge_cost)
                         else:
                             entry, outcome = place_gtd_limit_order(client, current_bucket, opp_token, opp_ask, tick_size, shares=hedge_shares, limit_price=hedge_limit_price)
+                            cb["hedge_order_id"] = entry.order_id if outcome and entry else ""
+                            cb["hedge_placed_at"] = now_ts
+                            cb["hedge_fok_fallback"] = False
+                            cb["hedge_cost"] = hedge_cost
+                            cb["hedge_token"] = opp_token
                         if entry is None:
                             LOG.error(
                                 "[TRADE][HEDGE] event=failed bucket=%s dir=%s ask=%.4f limit=%.4f shares=%.4f cost=%.4f outcome=%s",
@@ -784,6 +858,9 @@ def main() -> int:
                             entry, outcome = place_market_buy_fok(client, current_bucket, hedge2_token, hedge2_cost)
                         else:
                             entry, outcome = place_gtd_limit_order(client, current_bucket, hedge2_token, orig_ask, tick_size, shares=hedge2_shares, limit_price=hedge2_limit_price)
+                            cb["hedge2_order_id"] = entry.order_id if outcome and entry else ""
+                            cb["hedge2_placed_at"] = now_ts
+                            cb["hedge2_fok_fallback"] = False
                         if entry is None:
                             LOG.error(
                                 "[TRADE][HEDGE2] event=failed bucket=%s dir=%s ask=%.4f limit=%.4f shares=%.4f cost=%.4f outcome=%s",
