@@ -656,11 +656,6 @@ def main() -> int:
                             "[TRADE][HEDGE] event=trigger bucket=%s from=%s to=%s opp_ask=%.4f ask_ready=%s move=%+.2f move_ready=%s secs_left=%d",
                             current_bucket, pos_dir, opp_dir, opp_ask, ask_ready, cb["move"], move_flip_ready, secs_left
                         )
-                        cb["direction"] = opp_dir
-                        cb["hedge_pos_dir"] = pos_dir
-                        cb["hedge_token"] = opp_token
-                        cb["hedge_cost"] = hedge_cost
-                        entry_number = cb["entries"] + 1
                         if secs_left >= 60:
                             hedge_limit_price = opp_ask - 0.01
                         else:
@@ -677,6 +672,13 @@ def main() -> int:
                         first_trade_cost = float(state["positions"][cb["ts"]]["entries"][0].get("cost", 0.0) or 0.0)
                         hedge_shares = round(max((first_trade_cost * 1.01) / net_profit_per_share, 1.0), 4)
                         hedge_cost = round(hedge_shares * hedge_limit_price, 4)
+
+                        cb["direction"] = opp_dir
+                        cb["hedge_pos_dir"] = pos_dir
+                        cb["hedge_token"] = opp_token
+                        cb["hedge_cost"] = hedge_cost
+                        entry_number = cb["entries"] + 1
+
                         LOG.debug(
                             "[TRADE][HEDGE] event=sizing bucket=%s dir=%s first_cost=%.4f limit=%.4f npps=%.6f required_shares=%.4f required_cost=%.4f",
                             current_bucket, opp_dir, first_trade_cost, hedge_limit_price, net_profit_per_share, hedge_shares, hedge_cost,
@@ -815,6 +817,10 @@ def main() -> int:
                             current_bucket, orig_dir, first_trade_cost, first_hedge_cost, first_trade_shares, hedge2_limit_price, net_profit_per_share2, target_recovery, hedge2_shares, hedge2_cost,
                         )
                         ui.add_log(f"#{entry_number} HEDGE2 {orig_dir}: ask={orig_ask:.4f} ETH_move=${cb['move']:+.2f} secs_left={secs_left}")
+
+                        cb["hedge2_orig_dir"] = orig_dir
+                        cb["hedge2_token"] = hedge2_token
+                        cb["hedge2_cost"] = hedge2_cost
 
                         if not args.live:
                             LOG.info(
