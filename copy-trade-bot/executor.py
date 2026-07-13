@@ -53,7 +53,7 @@ def fetch_condition_id(slug: str) -> Optional[str]:
     import json, requests
     from config import GAMMA_EVENTS_URL
     try:
-        resp = requests.get(GAMMA_EVENTS_URL, params={"slug": slug}, timeout=12)
+        resp = requests.get(GAMMA_EVENTS_URL, params={"slug": slug}, timeout=3)
         resp.raise_for_status()
         ev = resp.json()
         if not ev:
@@ -213,8 +213,8 @@ def place_gtd_limit_order(
     if expiration_offset is None:
         expiration_offset = GTD_EXPIRY_OFFSET
     expiration_ts = max(
-        bucket_ts + 300 + expiration_offset + 60,
-        int(time.time()) + 181,
+        bucket_ts + 300 + expiration_offset,
+        int(time.time()) + 600,
     )
 
     LOG.info("[ORDER] event=submit bucket=%s token=%s side=BUY ask=%.4f limit=%.4f shares=%.4f expiration=%d", bucket_ts, token[:8], ask_price, limit_price, shares, expiration_ts)
@@ -481,7 +481,7 @@ def get_order_status(client: ClobClient, order_id: str) -> Optional[dict]:
 def get_market_resolution(bucket_ts: int) -> Optional[str]:
     slug = f"eth-updown-5m-{bucket_ts}"
     try:
-        resp = requests.get(GAMMA_EVENTS_URL, params={"slug": slug}, timeout=10)
+        resp = requests.get(GAMMA_EVENTS_URL, params={"slug": slug}, timeout=3)
         resp.raise_for_status()
         data = resp.json()
         if not data or not data[0].get("markets"):
