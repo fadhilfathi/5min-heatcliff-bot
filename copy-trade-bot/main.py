@@ -23,6 +23,7 @@ from dotenv import load_dotenv
 
 from config import (
     ETH_MOVE_THRESHOLD,
+    ENTRY_SHARES,
     FORCE_EXIT_MIN_PROFIT_PCT,
     FORCE_EXIT_SECONDS,
     INITIAL_ENTRY_MAX_ASK,
@@ -343,9 +344,10 @@ def main() -> int:
     ui = CopyTradeUI(state, control)
     LOG.info("[BOOT] event=start mode=%s env_file=%s verbose=%s target_profit=%.2f", mode, args.env_file, args.verbose, target_profit)
     LOG.info(
-        "[BOOT] event=config stake=%.2f move_threshold=%.2f flip_threshold=%.2f hedge_ask_threshold=%.2f hedge_move_threshold=%.2f min_seconds_left=%d max_entries=%d max_buckets=%d",
+        "[BOOT] event=config stake=%.2f entry_shares=%d move_threshold=%.2f flip_threshold=%.2f hedge_ask_threshold=%.2f hedge_move_threshold=%.2f min_seconds_left=%d max_entries=%d max_buckets=%d",
         STAKE_USD_PER_ENTRY,
-    ETH_MOVE_THRESHOLD,
+        ENTRY_SHARES,
+        ETH_MOVE_THRESHOLD,
         FLIP_MOVE_THRESHOLD,
         HEDGE_OPPOSITE_ASK_THRESHOLD,
         HEDGE_OPPOSITE_MOVE_THRESHOLD,
@@ -354,7 +356,7 @@ def main() -> int:
         MAX_CONCURRENT_BUCKETS,
     )
     ui.add_log("starting ETH directional momentum bot")
-    ui.add_log(f"mode={mode} stake=${STAKE_USD_PER_ENTRY} threshold=${ETH_MOVE_THRESHOLD} max_entries={MAX_ENTRIES_PER_BUCKET}")
+    ui.add_log(f"mode={mode} stake=${STAKE_USD_PER_ENTRY} shares={ENTRY_SHARES} threshold=${ETH_MOVE_THRESHOLD} max_entries={MAX_ENTRIES_PER_BUCKET}")
 
     client = None
     start_balance = None
@@ -399,26 +401,143 @@ def main() -> int:
             # --- HEDGE TIMEOUT CHECK ---
             if args.live and client is not None:
                 cb = state.get("current_bucket", {})
+                cb_secs_left = _seconds_left(cb["ts"]) if cb.get("ts") else 0
+
                 if cb.get("hedge_order_id") and not cb.get("hedge_fok_fallback"):
                     order = _bounded(lambda oid=cb["hedge_order_id"]: get_order_status(client, oid), timeout=2, default=None)
-                    if order and order.get("status") == "ORDER_STATUS_MATCHED":
+                    if order and order.get("status") == "MATCHED":
                         cb["hedge_filled"] = True
-                    elif now_ts - cb["hedge_placed_at"] >= 30 and _hedge_conditions_still_met(cb):
-                        LOG.warning("[TRADE][HEDGE] event=timeout bucket=%s order_id=%s secs_elapsed=%d", cb["ts"], cb["hedge_order_id"][:10], now_ts - cb["hedge_placed_at"])
+                    elif 30 <= cb_secs_left < 60 and not cb.get("hedge_repriced"):
+                        pos = state.get("positions", {}).get(cb.get("ts"), {})
+                        if pos.get("status") == "OPEN" and _hedge_conditions_still_met(cb):
+                            _, fresh_ask = poly_book_ws.get_best_prices(cb.get("hedge_token", ""))
+                            if fresh_ask > 0 and fresh_ask < 0.95:
+                                new_limit = round(min(fresh_ask + 0.01, 0.99), 4)
+                                new_npps = max((1.0 - new_limit) * 0.93, 0.005)
+                                first_trade_cost = float(pos.get("entries", [{}])[0].get("cost", 0.0) or 0.0)
+                                new_shares = round(max((first_trade_cost * 1.01) / new_npps, 1.0), 4)
+                                new_cost = round(new_shares * new_limit, 4)
+                                bal = get_balance(client)
+                                if bal is not None and bal < new_cost:
+                                    affordable_budget = round(max(bal * 0.98, 0.0), 4)
+                                    affordable_shares = round(max(affordable_budget / new_limit, 0.0), 4)
+                                    if affordable_shares >= 1.0:
+                                        new_shares = affordable_shares
+                                        new_cost = round(new_shares * new_limit, 4)
+                                    else:
+                                        new_cost = 0.0
+                                if new_cost >= 1.0:
+                                    LOG.warning(
+                                        "[TRADE][HEDGE] event=repricing bucket=%s old_order=%s secs_left=%d old_limit=%.4f new_limit=%.4f new_shares=%.4f new_cost=%.4f",
+                                        cb["ts"], cb["hedge_order_id"][:10], cb_secs_left, float(order.get("price", 0) or 0), new_limit, new_shares, new_cost
+                                    )
+                                    _bounded(lambda oid=cb["hedge_order_id"]: cancel_order(client, oid), timeout=2, default=False)
+                                    tick_size = get_tick_size(client, cb["hedge_token"])
+                                    entry, outcome = place_gtd_limit_order(client, cb["ts"], cb["hedge_token"], fresh_ask, tick_size, shares=new_shares, limit_price=new_limit)
+                                    if outcome and entry:
+                                        cb["hedge_order_id"] = entry.order_id
+                                        cb["hedge_placed_at"] = now_ts
+                                        cb["hedge_repriced"] = True
+                                        cb["hedge_cost"] = new_cost
+                                        for _e in pos.get("entries", []):
+                                            if _e.get("token") == cb["hedge_token"]:
+                                                _e["order_id"] = entry.order_id
+                                                _e["status"] = "OPEN"
+                                                _e["shares"] = new_shares
+                                                _e["cost"] = new_cost
+                                                _e["limit_price"] = new_limit
+                                                break
+                                    else:
+                                        LOG.warning("[TRADE][HEDGE] event=repricing_failed bucket=%s reason=order_failed", cb["ts"])
+                                else:
+                                    LOG.warning("[TRADE][HEDGE] event=repricing_skip bucket=%s reason=insufficient_balance", cb["ts"])
+                            else:
+                                LOG.warning("[TRADE][HEDGE] event=repricing_skip bucket=%s reason=ask_too_high fresh_ask=%.4f", cb["ts"], fresh_ask)
+                    elif cb_secs_left < 30:
+                        pos = state.get("positions", {}).get(cb.get("ts"), {})
+                        LOG.warning("[TRADE][HEDGE] event=timeout_cancel bucket=%s order_id=%s secs_left=%d", cb["ts"], cb["hedge_order_id"][:10], cb_secs_left)
                         _bounded(lambda oid=cb["hedge_order_id"]: cancel_order(client, oid), timeout=2, default=False)
-                        entry, outcome = place_market_buy_fok(client, cb["ts"], cb["up_token"] if cb["direction"] == "DOWN" else cb["down_token"], cb["hedge_cost"])
                         cb["hedge_fok_fallback"] = True
-                        cb["hedge_order_id"] = entry.order_id if outcome and entry else ""
+                        if pos.get("status") == "OPEN" and _hedge_conditions_still_met(cb):
+                            _, opp_ask = poly_book_ws.get_best_prices(cb.get("hedge_token", ""))
+                            if opp_ask > 0 and opp_ask < 0.95:
+                                fok_limit_price = round(min(opp_ask, 0.99), 4)
+                                npps = max((1.0 - fok_limit_price) * 0.93, 0.005)
+                                first_trade_cost = float(pos.get("entries", [{}])[0].get("cost", 0.0) or 0.0)
+                                target_recovery = first_trade_cost * 1.01
+                                required_shares = round(max(target_recovery / npps, 1.0), 4)
+                                fok_amount = round(required_shares * fok_limit_price, 4)
+                                bal = get_balance(client)
+                                if bal is not None and bal < fok_amount:
+                                    affordable_budget = round(max(bal * 0.98, 0.0), 4)
+                                    affordable_shares = round(max(affordable_budget / fok_limit_price, 0.0), 4)
+                                    if affordable_shares >= 1.0:
+                                        fok_amount = round(affordable_shares * fok_limit_price, 4)
+                                    else:
+                                        fok_amount = 0.0
+                                if fok_amount >= 1.0:
+                                    entry, outcome = place_market_buy_fok(client, cb["ts"], cb["hedge_token"], fok_amount)
+                                    if outcome and entry:
+                                        cb["hedge_order_id"] = entry.order_id
+                                        for _e in pos.get("entries", []):
+                                            if _e.get("token") == cb["hedge_token"]:
+                                                _e["order_id"] = entry.order_id
+                                                _e["status"] = "FILLED"
+                                                _e["shares"] = entry.shares
+                                                _e["cost"] = entry.cost
+                                                _e["limit_price"] = entry.limit_price
+                                                break
+                                else:
+                                    LOG.warning("[TRADE][HEDGE] event=timeout_skip bucket=%s reason=insufficient_balance", cb["ts"])
+                            else:
+                                LOG.warning("[TRADE][HEDGE] event=timeout_skip bucket=%s reason=ask_too_high opp_ask=%.4f", cb["ts"], opp_ask)
+
                 if cb.get("hedge2_order_id") and not cb.get("hedge2_fok_fallback"):
                     order = _bounded(lambda oid=cb["hedge2_order_id"]: get_order_status(client, oid), timeout=2, default=None)
-                    if order and order.get("status") == "ORDER_STATUS_MATCHED":
+                    if order and order.get("status") == "MATCHED":
                         cb["hedge2_filled"] = True
-                    elif now_ts - cb["hedge2_placed_at"] >= 11 and _hedge2_conditions_still_met(cb):
-                        LOG.warning("[TRADE][HEDGE2] event=timeout bucket=%s order_id=%s secs_elapsed=%d", cb["ts"], cb["hedge2_order_id"][:10], now_ts - cb["hedge2_placed_at"])
+                    elif cb_secs_left <= 11:
+                        pos = state.get("positions", {}).get(cb.get("ts"), {})
+                        LOG.warning("[TRADE][HEDGE2] event=timeout_cancel bucket=%s order_id=%s secs_left=%d", cb["ts"], cb["hedge2_order_id"][:10], cb_secs_left)
                         _bounded(lambda oid=cb["hedge2_order_id"]: cancel_order(client, oid), timeout=2, default=False)
-                        entry, outcome = place_market_buy_fok(client, cb["ts"], cb["hedge2_token"], cb["hedge2_cost"])
                         cb["hedge2_fok_fallback"] = True
-                        cb["hedge2_order_id"] = entry.order_id if outcome and entry else ""
+                        if pos.get("status") == "OPEN" and _hedge2_conditions_still_met(cb):
+                            _, orig_ask = poly_book_ws.get_best_prices(cb.get("hedge2_token", ""))
+                            if orig_ask > 0 and orig_ask < 0.95:
+                                fok_limit_price = round(min(orig_ask, 0.99), 4)
+                                npps2 = max((1.0 - fok_limit_price) * 0.93, 0.005)
+                                first_entry = pos.get("entries", [{}])[0]
+                                second_entry = pos.get("entries", [{}, {}])[1] if len(pos.get("entries", [])) > 1 else {}
+                                first_trade_cost = float(first_entry.get("cost", 0.0) or 0.0)
+                                first_trade_shares = float(first_entry.get("shares", 0.0) or 0.0)
+                                first_hedge_cost = float(second_entry.get("cost", 0.0) or 0.0)
+                                target_recovery = (1.01 * (first_trade_cost + first_hedge_cost)) - first_trade_shares
+                                required_shares = round(max(target_recovery / npps2, 1.0), 4)
+                                fok_amount = round(required_shares * fok_limit_price, 4)
+                                bal = get_balance(client)
+                                if bal is not None and bal < fok_amount:
+                                    affordable_budget = round(max(bal * 0.98, 0.0), 4)
+                                    affordable_shares = round(max(affordable_budget / fok_limit_price, 0.0), 4)
+                                    if affordable_shares >= 1.0:
+                                        fok_amount = round(affordable_shares * fok_limit_price, 4)
+                                    else:
+                                        fok_amount = 0.0
+                                if fok_amount >= 1.0:
+                                    entry, outcome = place_market_buy_fok(client, cb["ts"], cb["hedge2_token"], fok_amount)
+                                    if outcome and entry:
+                                        cb["hedge2_order_id"] = entry.order_id
+                                        for _e in pos.get("entries", []):
+                                            if _e.get("token") == cb["hedge2_token"]:
+                                                _e["order_id"] = entry.order_id
+                                                _e["status"] = "FILLED"
+                                                _e["shares"] = entry.shares
+                                                _e["cost"] = entry.cost
+                                                _e["limit_price"] = entry.limit_price
+                                                break
+                                else:
+                                    LOG.warning("[TRADE][HEDGE2] event=timeout_skip bucket=%s reason=insufficient_balance", cb["ts"])
+                            else:
+                                LOG.warning("[TRADE][HEDGE2] event=timeout_skip bucket=%s reason=ask_too_high orig_ask=%.4f", cb["ts"], orig_ask)
 
             if now_ts - last_balance_check > 10 and args.live and client is not None:
                 bal = _bounded(lambda: get_balance(client), timeout=3)
@@ -492,13 +611,13 @@ def main() -> int:
                         continue
                     pos_secs_left = _seconds_left(pos_ts)
                     if profit_pct >= TAKE_PROFIT_PCT:
-                        LOG.info("[TRADE][EXIT] event=trigger bucket=%s reason=take_profit bid=%.4f profit=%+.4f profit_pct=%.4f secs_left=%d", pos_ts, bid, profit, profit_pct, pos_secs_left)
+                        LOG.debug("[TRADE][EXIT] event=trigger bucket=%s reason=take_profit bid=%.4f profit=%+.4f profit_pct=%.4f secs_left=%d", pos_ts, bid, profit, profit_pct, pos_secs_left)
                         closed = _bounded(lambda: _close_simple_position(client, pos_ts, pos, "take_profit", bid, ui), timeout=5, default=False)
                         if closed:
                             closed_any = True
                             continue
                     if pos_secs_left <= FORCE_EXIT_SECONDS and profit_pct > FORCE_EXIT_MIN_PROFIT_PCT:
-                        LOG.info("[TRADE][EXIT] event=trigger bucket=%s reason=force_profit_exit bid=%.4f profit=%+.4f profit_pct=%.4f secs_left=%d", pos_ts, bid, profit, profit_pct, pos_secs_left)
+                        LOG.debug("[TRADE][EXIT] event=trigger bucket=%s reason=force_profit_exit bid=%.4f profit=%+.4f profit_pct=%.4f secs_left=%d", pos_ts, bid, profit, profit_pct, pos_secs_left)
                         closed = _bounded(lambda: _close_simple_position(client, pos_ts, pos, "force_profit_exit", bid, ui), timeout=5, default=False)
                         if closed:
                             closed_any = True
@@ -602,6 +721,8 @@ def main() -> int:
                 up_token, down_token = _bounded(_get_eth_tokens, timeout=3, default=(None, None))
                 if not up_token or not down_token:
                     LOG.warning("[STATE] event=bucket_open_missing_tokens bucket=%s eth_open=%.2f", current_bucket, eth_price)
+                    time.sleep(0.05)
+                    continue
                 cb["up_token"] = up_token
                 cb["down_token"] = down_token
                 _sync_ws_subscriptions(state, cb)
@@ -652,7 +773,7 @@ def main() -> int:
                         current_bucket, pos_dir, opp_dir, opp_ask, ask_ready, HEDGE_OPPOSITE_ASK_THRESHOLD, cb["move"], move_flip_ready, HEDGE_OPPOSITE_MOVE_THRESHOLD, secs_left,
                     )
                     if ask_ready and move_flip_ready:
-                        LOG.info(
+                        LOG.debug(
                             "[TRADE][HEDGE] event=trigger bucket=%s from=%s to=%s opp_ask=%.4f ask_ready=%s move=%+.2f move_ready=%s secs_left=%d",
                             current_bucket, pos_dir, opp_dir, opp_ask, ask_ready, cb["move"], move_flip_ready, secs_left
                         )
@@ -726,6 +847,7 @@ def main() -> int:
                             cb["hedge_order_id"] = entry.order_id if outcome and entry else ""
                             cb["hedge_placed_at"] = now_ts
                             cb["hedge_fok_fallback"] = False
+                            cb["hedge_repriced"] = secs_left < 60
                             cb["hedge_cost"] = hedge_cost
                             cb["hedge_token"] = opp_token
                         if entry is None:
@@ -756,7 +878,7 @@ def main() -> int:
                         time.sleep(GTD_ENTRY_DELAY_SECONDS)
                         continue
                     else:
-                        LOG.info(
+                        LOG.debug(
                             "[TRADE][HEDGE] event=skip bucket=%s reason=conditions_not_met opp_ask=%.4f ask_ready=%s move=%+.2f move_ready=%s secs_left=%d",
                             current_bucket, opp_ask, ask_ready, cb["move"], move_flip_ready, secs_left,
                         )
@@ -785,7 +907,7 @@ def main() -> int:
                     move2_ready = move_to_orig >= HEDGE2_MOVE_THRESHOLD
                     ask2_ready = orig_ask >= HEDGE2_ASK_THRESHOLD
                     if move2_ready and ask2_ready:
-                        LOG.info(
+                        LOG.debug(
                             "[TRADE][HEDGE2] event=trigger bucket=%s to=%s ask=%.4f ask_ready=%s move=%+.2f move_to_orig=%.2f move_ready=%s secs_left=%d",
                             current_bucket, orig_dir, orig_ask, ask2_ready, cb["move"], move_to_orig, move2_ready, secs_left
                         )
@@ -975,9 +1097,12 @@ def main() -> int:
             )
 
             if not args.live:
+                dry_limit = round(max(ask + 0.01, 0.01), 4)
+                dry_shares = float(ENTRY_SHARES)
+                dry_cost = round(dry_shares * dry_limit, 4)
                 LOG.info(
                     "[TRADE][ENTRY] event=dry_run bucket=%s dir=%s entry=%d token=%s ask=%.4f limit=%.4f shares=%.4f cost=%.4f",
-                    current_bucket, cb["direction"], entry_number, token[:8], ask, round(max(ask - 0.01, 0.01), 4), round(STAKE_USD_PER_ENTRY / max(ask - 0.01, 0.01), 4), STAKE_USD_PER_ENTRY
+                    current_bucket, cb["direction"], entry_number, token[:8], ask, dry_limit, dry_shares, dry_cost
                 )
                 cb["entries"] += 1
                 state["_meta"]["entry_count"] += 1
@@ -999,12 +1124,12 @@ def main() -> int:
                 state["positions"][cb_ts]["entries"].append({
                     "side": cb["direction"],
                     "ask": ask,
-                    "limit_price": round(max(ask - 0.01, 0.01), 4),
-                    "shares": round(STAKE_USD_PER_ENTRY / max(ask - 0.01, 0.01), 4),
-                    "cost": STAKE_USD_PER_ENTRY,
+                    "limit_price": dry_limit,
+                    "shares": dry_shares,
+                    "cost": dry_cost,
                     "status": "DRY_SKIP",
                 })
-                state["positions"][cb_ts]["total_cost"] += STAKE_USD_PER_ENTRY
+                state["positions"][cb_ts]["total_cost"] += dry_cost
                 time.sleep(0.05)
                 continue
 
@@ -1014,16 +1139,17 @@ def main() -> int:
                 continue
 
             bal = get_balance(client)
-            if bal is not None and bal < STAKE_USD_PER_ENTRY:
-                LOG.debug("[RISK] event=skip bucket=%s reason=insufficient_balance balance=%.4f required=%.4f", current_bucket, bal, STAKE_USD_PER_ENTRY)
-                ui.add_log(f"skip: balance ${bal:.2f} < ${STAKE_USD_PER_ENTRY}")
+            entry_cost_estimate = ENTRY_SHARES * round(ask + 0.01, 4)
+            if bal is not None and bal < entry_cost_estimate:
+                LOG.debug("[RISK] event=skip bucket=%s reason=insufficient_balance balance=%.4f required=%.4f", current_bucket, bal, entry_cost_estimate)
+                ui.add_log(f"skip: balance ${bal:.2f} < ${entry_cost_estimate:.2f}")
                 time.sleep(0.05)
                 continue
 
             tick_size = get_tick_size(client, token)
             LOG.info("[TRADE][ENTRY] event=submit bucket=%s dir=%s entry=%d token=%s ask=%.4f secs_left=%d mode=LIVE", current_bucket, cb["direction"], entry_number, token[:8], ask, secs_left)
             entry, outcome = place_gtd_limit_order(
-                client, current_bucket, token, ask, tick_size
+                client, current_bucket, token, ask, tick_size, shares=ENTRY_SHARES, limit_price=round(ask + 0.01, 4)
             )
             if entry is None and "invalid amount for a marketable BUY order" in outcome and "min size: $1" in outcome:
                 retry_amount_usd = max(STAKE_USD_PER_ENTRY, 1.0)
