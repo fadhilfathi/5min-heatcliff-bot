@@ -73,17 +73,17 @@ class CopyTradeUI:
         hours, rem = divmod(elapsed, 3600)
         minutes, seconds = divmod(rem, 60)
         runtime = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-        eth_price = meta.get("eth_price", 0.0)
-        eth_open = cb.get("eth_open", 0.0)
+        btc_price = meta.get("btc_price", 0.0)
+        btc_open = cb.get("btc_open", 0.0)
         move = cb.get("move", 0.0)
         move_color = "green" if move > 0 else "red" if move < 0 else "white"
-        move_str = f"${move:+.2f}" if eth_open > 0 else "—"
+        move_str = f"${move:+.2f}" if btc_open > 0 else "—"
         direction = cb.get("direction", "—") or "—"
 
         layout["header"].update(
             Panel(
                 f"Mode=[cyan]{meta['mode']}[/cyan] "
-                f"ETH=[cyan]${eth_price:,.2f}[/cyan] "
+                f"BTC=[cyan]${btc_price:,.2f}[/cyan] "
                 f"Move=[{move_color}]{move_str}[/{move_color}] "
                 f"Direction=[cyan]{direction}[/cyan] "
                 f"Best=[cyan]${cb.get('best_abs_move', 0):,.2f}[/cyan] "

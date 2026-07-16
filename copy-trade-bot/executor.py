@@ -251,7 +251,7 @@ def place_gtd_limit_order(
     status = "FILLED" if taking_amount > 0 else "RESTING"
 
     entry = Entry(
-        coin="ETH",
+        coin="BTC",
         bucket_ts=bucket_ts,
         side="UP" if "up" in token.lower() else "DOWN",
         token=token,
@@ -301,7 +301,7 @@ def place_market_sell_fok(
     filled_shares = shares if making_amount <= 0 else making_amount
     proceeds = taking_amount if taking_amount > 0 else 0.0
     entry = Entry(
-        coin="ETH",
+        coin="BTC",
         bucket_ts=bucket_ts,
         side="SELL",
         token=token,
@@ -346,7 +346,7 @@ def place_market_buy_fok(
     filled_cost = making_amount if making_amount > 0 else amount_usd
     avg_price = round(filled_cost / filled_shares, 4) if filled_shares > 0 else 0.0
     entry = Entry(
-        coin="ETH",
+        coin="BTC",
         bucket_ts=bucket_ts,
         side="UP" if "up" in token.lower() else "DOWN",
         token=token,
@@ -395,7 +395,7 @@ def place_limit_sell_fak(
     filled_shares = shares if making_amount <= 0 else making_amount
     proceeds = taking_amount if taking_amount > 0 else round(filled_shares * price, 6)
     entry = Entry(
-        coin="ETH",
+        coin="BTC",
         bucket_ts=bucket_ts,
         side="SELL",
         token=token,
@@ -479,7 +479,7 @@ def get_order_status(client: ClobClient, order_id: str) -> Optional[dict]:
 
 
 def get_market_resolution(bucket_ts: int) -> Optional[str]:
-    slug = f"eth-updown-5m-{bucket_ts}"
+    slug = f"btc-updown-5m-{bucket_ts}"
     try:
         resp = requests.get(GAMMA_EVENTS_URL, params={"slug": slug}, timeout=3)
         resp.raise_for_status()

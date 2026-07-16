@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""copy-trade-bot/main.py — Autonomous ETH 5m directional momentum bot.
-Places GTD limit orders below ask when ETH moves since bucket open.
-Scales in (up to 3 entries per bucket) if ETH keeps moving same direction.
+"""copy-trade-bot/main.py — Autonomous BTC 5m directional momentum bot.
+Places GTD limit orders below ask when BTC moves since bucket open.
+Scales in (up to 3 entries per bucket) if BTC keeps moving same direction.
 Rides all positions to settlement. No sells."""
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ sys.path.insert(0, str(BOT_DIR))
 from dotenv import load_dotenv
 
 from config import (
-    ETH_MOVE_THRESHOLD,
+    BTC_MOVE_THRESHOLD,
     ENTRY_SHARES,
     FORCE_EXIT_MIN_PROFIT_PCT,
     FORCE_EXIT_SECONDS,
@@ -64,7 +64,7 @@ from executor import (
     place_market_buy_fok,
 )
 from models import Entry
-from price_feed import get_eth_price
+from price_feed import get_btc_price
 from tui import CopyTradeUI
 
 LOG = logging.getLogger("copy_trade")
@@ -158,7 +158,7 @@ def _estimate_exit_profit(client, token: str, shares: float, total_cost: float) 
 _last_exit_error_ts: dict[int, float] = {}
 
 
-def _close_simple_position(client, pos_ts: int, pos: dict[str, Any], reason: str, bid: float, ui: CopyTradeUI) -> bool:
+def _close_simple_position(client, pos_ts: int, pos: dict[str, Any], reason: str, bid: float, ui: CopyTradeUI, target_price=None) -> bool:
     token = _simple_open_position_token(pos)
     if not token:
         return False
@@ -168,11 +168,17 @@ def _close_simple_position(client, pos_ts: int, pos: dict[str, Any], reason: str
         return False
     tick_size = get_tick_size(client, token)
     sell_bid = min(bid, 0.99)
-    close_entry, outcome = place_market_sell_fok(client, pos_ts, token, shares)
-    method = "fok_market_sell"
-    if close_entry is None:
-        close_entry, outcome = place_limit_sell_fak(client, pos_ts, token, shares, sell_bid)
-        method = "fak_limit_sell"
+    if target_price is not None:
+        target_price = round(min(max(target_price, 0.01), 0.99), 4)
+        close_entry, outcome = place_limit_sell_fak(client, pos_ts, token, shares, target_price)
+        method = "fak_limit_sell_target"
+        sell_bid = target_price
+    else:
+        close_entry, outcome = place_market_sell_fok(client, pos_ts, token, shares)
+        method = "fok_market_sell"
+        if close_entry is None:
+            close_entry, outcome = place_limit_sell_fak(client, pos_ts, token, shares, sell_bid)
+            method = "fak_limit_sell"
     if close_entry is None:
         now = time.time()
         if now - _last_exit_error_ts.get(pos_ts, 0) >= 5.0:
@@ -226,8 +232,8 @@ def _build_state() -> dict[str, Any]:
         "positions": {},
         "current_bucket": {
             "ts": 0,
-            "eth_open": 0.0,
-            "eth_now": 0.0,
+            "btc_open": 0.0,
+            "btc_now": 0.0,
             "move": 0.0,
             "direction": "",
             "entries": 0,
@@ -247,7 +253,7 @@ def _build_state() -> dict[str, Any]:
             "active_buckets": 0,
             "entry_count": 0,
             "poll_count": 0,
-            "eth_price": 0.0,
+            "btc_price": 0.0,
         },
     }
 
@@ -256,12 +262,12 @@ def _seconds_left(bucket_ts: int) -> int:
     return max(0, (bucket_ts + 300) - int(time.time()))
 
 
-def _get_eth_tokens() -> tuple[str, str]:
+def _get_btc_tokens() -> tuple[str, str]:
     import json, requests
     from config import GAMMA_EVENTS_URL
     now_ts = int(time.time())
     bucket = now_ts - (now_ts % 300)
-    slug = f"eth-updown-5m-{bucket}"
+    slug = f"btc-updown-5m-{bucket}"
     LOG.debug("[MARKET][TOKEN] event=resolve_start slug=%s", slug)
     try:
         resp = requests.get(GAMMA_EVENTS_URL, params={"slug": slug}, timeout=10)
@@ -347,7 +353,7 @@ def main() -> int:
         "[BOOT] event=config stake=%.2f entry_shares=%d move_threshold=%.2f flip_threshold=%.2f hedge_ask_threshold=%.2f hedge_move_threshold=%.2f min_seconds_left=%d max_entries=%d max_buckets=%d",
         STAKE_USD_PER_ENTRY,
         ENTRY_SHARES,
-        ETH_MOVE_THRESHOLD,
+BTC_MOVE_THRESHOLD,
         FLIP_MOVE_THRESHOLD,
         HEDGE_OPPOSITE_ASK_THRESHOLD,
         HEDGE_OPPOSITE_MOVE_THRESHOLD,
@@ -355,8 +361,8 @@ def main() -> int:
         MAX_ENTRIES_PER_BUCKET,
         MAX_CONCURRENT_BUCKETS,
     )
-    ui.add_log("starting ETH directional momentum bot")
-    ui.add_log(f"mode={mode} stake=${STAKE_USD_PER_ENTRY} shares={ENTRY_SHARES} threshold=${ETH_MOVE_THRESHOLD} max_entries={MAX_ENTRIES_PER_BUCKET}")
+    ui.add_log("starting BTC directional momentum bot")
+    ui.add_log(f"mode={mode} stake=${STAKE_USD_PER_ENTRY} shares={ENTRY_SHARES} threshold=${BTC_MOVE_THRESHOLD} max_entries={MAX_ENTRIES_PER_BUCKET}")
 
     client = None
     start_balance = None
@@ -611,8 +617,10 @@ def main() -> int:
                         continue
                     pos_secs_left = _seconds_left(pos_ts)
                     if profit_pct >= TAKE_PROFIT_PCT:
-                        LOG.debug("[TRADE][EXIT] event=trigger bucket=%s reason=take_profit bid=%.4f profit=%+.4f profit_pct=%.4f secs_left=%d", pos_ts, bid, profit, profit_pct, pos_secs_left)
-                        closed = _bounded(lambda: _close_simple_position(client, pos_ts, pos, "take_profit", bid, ui), timeout=5, default=False)
+                        cost_per_share = total_cost / shares if shares > 0 else 0.0
+                        target_price = round(cost_per_share * (1.0 + TAKE_PROFIT_PCT), 4)
+                        LOG.debug("[TRADE][EXIT] event=trigger bucket=%s reason=take_profit bid=%.4f target=%.4f profit=%+.4f profit_pct=%.4f secs_left=%d", pos_ts, bid, target_price, profit, profit_pct, pos_secs_left)
+                        closed = _bounded(lambda tp=target_price: _close_simple_position(client, pos_ts, pos, "take_profit", bid, ui, target_price=tp), timeout=5, default=False)
                         if closed:
                             closed_any = True
                             continue
@@ -701,39 +709,39 @@ def main() -> int:
                         ui.add_log(f"monitor bucket={pos_ts}: resolution pending, filled={filled_entries}/{total_entries}")
                         pos["last_pending_log_at"] = now_ts
 
-            eth_price = get_eth_price()
-            if eth_price is None:
+            btc_price = get_btc_price()
+            if btc_price is None:
                 LOG.debug("[MARKET][PRICE] event=skip_loop reason=price_unavailable")
                 time.sleep(0.05)
                 continue
-            state["_meta"]["eth_price"] = eth_price
+            state["_meta"]["btc_price"] = btc_price
 
             if cb["ts"] != current_bucket:
                 cb["ts"] = current_bucket
-                cb["eth_open"] = eth_price
-                cb["eth_now"] = eth_price
+                cb["btc_open"] = btc_price
+                cb["btc_now"] = btc_price
                 cb["move"] = 0.0
                 cb["direction"] = ""
                 cb["entries"] = 0
                 cb["best_abs_move"] = 0.0
                 cb["hedge_count"] = 0
                 cb["last_logged_dir"] = ""
-                up_token, down_token = _bounded(_get_eth_tokens, timeout=3, default=(None, None))
+                up_token, down_token = _bounded(_get_btc_tokens, timeout=3, default=(None, None))
                 if not up_token or not down_token:
-                    LOG.warning("[STATE] event=bucket_open_missing_tokens bucket=%s eth_open=%.2f", current_bucket, eth_price)
+                    LOG.warning("[STATE] event=bucket_open_missing_tokens bucket=%s btc_open=%.2f", current_bucket, btc_price)
                     time.sleep(0.05)
                     continue
                 cb["up_token"] = up_token
                 cb["down_token"] = down_token
                 _sync_ws_subscriptions(state, cb)
                 LOG.info(
-                    "[STATE] event=bucket_open bucket=%s eth_open=%.2f up_token=%s down_token=%s",
-                    current_bucket, eth_price, up_token[:8], down_token[:8]
+                    "[STATE] event=bucket_open bucket=%s btc_open=%.2f up_token=%s down_token=%s",
+                    current_bucket, btc_price, up_token[:8], down_token[:8]
                 )
-                ui.add_log(f"new bucket {current_bucket} ETH=${eth_price:.2f}")
+                ui.add_log(f"new bucket {current_bucket} BTC=${btc_price:.2f}")
 
-            cb["eth_now"] = eth_price
-            cb["move"] = eth_price - cb["eth_open"]
+            cb["btc_now"] = btc_price
+            cb["move"] = btc_price - cb["btc_open"]
             move_abs = abs(cb["move"])
 
             secs_left = _seconds_left(current_bucket)
@@ -743,7 +751,7 @@ def main() -> int:
                 time.sleep(0.05)
                 continue
 
-            # HEDGE: if opposite ask is rich or ETH has flipped far enough, buy opposite to recover.
+            # HEDGE: if opposite ask is rich or BTC has flipped far enough, buy opposite to recover.
             if (cb["entries"] > 0
                     and cb["ts"] in state["positions"]
                     and state["positions"][cb["ts"]].get("status") == "OPEN"
@@ -804,7 +812,7 @@ def main() -> int:
                             "[TRADE][HEDGE] event=sizing bucket=%s dir=%s first_cost=%.4f limit=%.4f npps=%.6f required_shares=%.4f required_cost=%.4f",
                             current_bucket, opp_dir, first_trade_cost, hedge_limit_price, net_profit_per_share, hedge_shares, hedge_cost,
                         )
-                        ui.add_log(f"#{entry_number} HEDGE {opp_dir}: opp_ask={opp_ask:.4f} ETH_move=${cb['move']:+.2f} secs_left={secs_left}")
+                        ui.add_log(f"#{entry_number} HEDGE {opp_dir}: opp_ask={opp_ask:.4f} BTC_move=${cb['move']:+.2f} secs_left={secs_left}")
                         if not args.live:
                             LOG.info(
                                 "[TRADE][HEDGE] event=dry_run bucket=%s dir=%s entry=%d ask=%.4f limit=%.4f shares=%.4f cost=%.4f",
@@ -938,7 +946,7 @@ def main() -> int:
                             "[TRADE][HEDGE2] event=sizing bucket=%s dir=%s first_cost=%.4f hedge1_cost=%.4f first_shares=%.4f limit=%.4f npps=%.6f target_recovery=%.4f required_shares=%.4f required_cost=%.4f",
                             current_bucket, orig_dir, first_trade_cost, first_hedge_cost, first_trade_shares, hedge2_limit_price, net_profit_per_share2, target_recovery, hedge2_shares, hedge2_cost,
                         )
-                        ui.add_log(f"#{entry_number} HEDGE2 {orig_dir}: ask={orig_ask:.4f} ETH_move=${cb['move']:+.2f} secs_left={secs_left}")
+                        ui.add_log(f"#{entry_number} HEDGE2 {orig_dir}: ask={orig_ask:.4f} BTC_move=${cb['move']:+.2f} secs_left={secs_left}")
 
                         cb["hedge2_orig_dir"] = orig_dir
                         cb["hedge2_token"] = hedge2_token
@@ -1019,15 +1027,15 @@ def main() -> int:
                         time.sleep(GTD_ENTRY_DELAY_SECONDS)
                         continue
 
-            if move_abs < ETH_MOVE_THRESHOLD:
-                LOG.debug("[SIGNAL] event=below_threshold bucket=%s move=%+.2f move_abs=%.2f threshold=%.2f", current_bucket, cb["move"], move_abs, ETH_MOVE_THRESHOLD)
+            if move_abs < BTC_MOVE_THRESHOLD:
+                LOG.debug("[SIGNAL] event=below_threshold bucket=%s move=%+.2f move_abs=%.2f threshold=%.2f", current_bucket, cb["move"], move_abs, BTC_MOVE_THRESHOLD)
                 time.sleep(0.05)
                 continue
 
             cb["direction"] = "UP" if cb["move"] > 0 else "DOWN"
             if cb["direction"] != cb.get("last_logged_dir"):
-                LOG.debug("[SIGNAL] event=threshold_cross bucket=%s move=%+.2f move_abs=%.2f threshold=%.2f dir=%s", current_bucket, cb["move"], move_abs, ETH_MOVE_THRESHOLD, cb["direction"])
-                ui.add_log(f"ETH moved ${cb['move']:+.2f} → direction {cb['direction']}")
+                LOG.debug("[SIGNAL] event=threshold_cross bucket=%s move=%+.2f move_abs=%.2f threshold=%.2f dir=%s", current_bucket, cb["move"], move_abs, BTC_MOVE_THRESHOLD, cb["direction"])
+                ui.add_log(f"BTC moved ${cb['move']:+.2f} → direction {cb['direction']}")
                 cb["last_logged_dir"] = cb["direction"]
 
             if cb["entries"] >= MAX_ENTRIES_PER_BUCKET:
@@ -1076,7 +1084,7 @@ def main() -> int:
                      is_flip = True
                      LOG.debug("[SIGNAL] event=flip_detected bucket=%s prev_dir=%s dir=%s move=%+.2f", current_bucket, pos_dir, cb["direction"], cb["move"])
 
-            threshold = FLIP_MOVE_THRESHOLD if is_flip else ETH_MOVE_THRESHOLD
+            threshold = FLIP_MOVE_THRESHOLD if is_flip else BTC_MOVE_THRESHOLD
             
             if cb["entries"] > 0 and not is_flip and move_abs <= cb.get("best_abs_move", 0.0):
                 LOG.debug("[SIGNAL] event=skip bucket=%s reason=not_extending move=%+.2f move_abs=%.2f best_abs_move=%.2f", current_bucket, cb["move"], move_abs, cb.get('best_abs_move', 0.0))
@@ -1092,7 +1100,7 @@ def main() -> int:
 
             entry_number = cb["entries"] + 1
             ui.add_log(
-                f"#{entry_number} {cb['direction']} entry: ETH_move=${cb['move']:+.2f} "
+                f"#{entry_number} {cb['direction']} entry: BTC_move=${cb['move']:+.2f} "
                 f"ask={ask:.4f} secs_left={secs_left}"
             )
 
@@ -1116,8 +1124,8 @@ def main() -> int:
                         "total_shares": 0.0,
                         "status": "OPEN",
                         "secs_left": secs_left,
-                        "eth_open": cb["eth_open"],
-                        "eth_now": cb["eth_now"],
+                        "btc_open": cb["btc_open"],
+                        "btc_now": cb["btc_now"],
                         "up_token": cb.get("up_token", ""),
                         "down_token": cb.get("down_token", ""),
                     }
@@ -1178,8 +1186,8 @@ def main() -> int:
                     "total_shares": 0.0,
                     "status": "OPEN",
                     "secs_left": secs_left,
-                    "eth_open": cb["eth_open"],
-                    "eth_now": cb["eth_now"],
+                    "btc_open": cb["btc_open"],
+                    "btc_now": cb["btc_now"],
                     "up_token": cb.get("up_token", ""),
                     "down_token": cb.get("down_token", ""),
                 }
